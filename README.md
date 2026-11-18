@@ -1,16 +1,20 @@
 # Velun
 
-Velun 是 macOS 原生私人影音播放器，用于整理和播放你自己的电影与剧集。
+简体中文 · [English](README.en.md)
 
-- 从本地文件夹、SMB、WebDAV 或 Alist 添加片源。也可接入 Jellyfin、Emby 和 Plex。
-- 使用自己的 TMDB 读取访问令牌匹配海报、简介和演职员信息；支持手动修正匹配。
-- 按季浏览剧集、保存观看进度、管理收藏，支持播放中选集。
-- 使用 AVFoundation 播放兼容片源，并通过 libmpv 支持 MKV 等更多格式、音轨和字幕。
-- 支持 HDR10 / HLG，并根据显示设备决定输出或转换为 SDR。兼容的视频可通过系统播放器使用 AirPlay。
+**为 Mac 打造的私人影音播放器。** Velun 的海报墙、剧集详情和播放操作受到 Infuse 启发。如果你喜欢 Infuse 的浏览和续播体验，想用一款开源的 macOS 应用管理本地或 NAS 片库，可以试试 Velun。这是独立项目，与 Infuse 和 Firecore 无关联。
 
-## 从源码运行
+## 功能
 
-需要 Apple Silicon、Xcode 和 Homebrew。随 Homebrew 安装的播放器库可能要求更高版本的 macOS；当前打包配置的最低版本为 macOS 27.2。
+- **本地与 NAS 片库** · 添加本地文件夹、SMB、WebDAV 或 Alist，也支持连接 Jellyfin、Emby 和 Plex。
+- **海报墙与剧集** · 查看海报和演职员信息、收藏、按季选集、保存观看进度和续播。
+- **多格式播放** · 使用 AVFoundation 和 libmpv，支持 MKV、音轨与字幕选择、HDR10 / HLG，以及兼容片源的 AirPlay。
+
+## 下载与构建
+
+打开 [GitHub Releases](https://github.com/superzhang/Velun/releases)，查看相应版本的下载内容和系统要求。目前的构建面向 Apple Silicon，应用包最低要求 macOS 27.2。
+
+从源码运行需要 Xcode 和 Homebrew：
 
 ```sh
 brew install mpv ffmpeg rclone
@@ -18,18 +22,18 @@ swift run
 swift test
 ```
 
-如需生成 macOS 应用包，安装有效的 Apple 代码签名证书，再运行 `./scripts/build-app.sh`。如果钥匙串中有多张签名证书，通过 `LUMA_SIGNING_IDENTITY` 指定使用哪一张。构建产物为上一级目录的 `Velun.app`。
+要生成应用包，安装有效的 Apple 代码签名证书，再运行 `./scripts/build-app.sh`。如有多张证书，可用 `LUMA_SIGNING_IDENTITY` 指定。应用包生成在上一级目录，名为 `Velun.app`。
 
-## 添加片源与海报
+## 配置 TMDB 海报
 
-在应用的「偏好设置 → 添加或管理来源」中添加本地文件夹或网络共享。要启用海报匹配，在「偏好设置 → TMDB → 海报与影片信息」填写你自己的 TMDB 读取访问令牌。令牌保存在 macOS 钥匙串中。
+播放视频无需 TMDB。要自动匹配海报和影片信息，请用自己的 TMDB 账户申请凭据。项目和发布包均不提供预置凭据。
 
-Velun 沿用早期版本的本机片库路径 `~/Library/Application Support/Luma`。
+1. 登录 TMDB，在 [账户的 API 设置](https://www.themoviedb.org/settings/api) 申请 API 凭据。
+2. 复制 **API Read Access Token（读取访问令牌）**。Velun 的输入框接受这个令牌。
+3. 在 Velun 打开 **偏好设置 → TMDB → 海报与影片信息 → 读取访问令牌**，粘贴后点击 **保存令牌**。随后可开启自动匹配，或点击「为未匹配视频查找海报」。
 
-## 第三方组件与数据
-
-第三方组件、TMDB 数据和图标的来源及许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+令牌仅存入本机 macOS 钥匙串。申请与认证说明见 [TMDB 官方文档](https://developer.themoviedb.org/docs/authentication-application)。
 
 ## 许可证
 
-Velun 源码采用 [GNU 通用公共许可证第 3 版或任何更新版本](LICENSE)（`GPL-3.0-or-later`）。第三方组件及素材适用各自的许可证，详见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+Velun 源码采用 [GPL-3.0-or-later](LICENSE)。依赖、TMDB 数据和图标的来源与许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。

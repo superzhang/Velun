@@ -22,7 +22,7 @@ def copy_library(path):
     shutil.copy2(source, target)
     target.chmod(0o755)
     inventory.append({'file': name, 'source': str(source.resolve())})
-    # Preserve the formula's license files and build metadata for review.
+    # Preserve license files. Installation receipts can contain local user paths.
     parts = source.resolve().parts
     if 'Cellar' in parts:
         index = parts.index('Cellar')
@@ -30,7 +30,7 @@ def copy_library(path):
         license_dir = app / 'Contents/Resources/ThirdParty' / root.parent.name
         license_dir.mkdir(parents=True, exist_ok=True)
         for candidate in root.rglob('*'):
-            if candidate.is_file() and (candidate.name.lower().startswith(('copying', 'license', 'copyright')) or candidate.name == 'INSTALL_RECEIPT.json'):
+            if candidate.is_file() and candidate.name.lower().startswith(('copying', 'license', 'copyright')):
                 relative = candidate.relative_to(root)
                 destination = license_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)

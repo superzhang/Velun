@@ -9,6 +9,7 @@ BIN_DIR="$(swift build -c release --show-bin-path)"
 APP="${LUMA_APP_OUTPUT:-../Velun.app}"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Luma" "$APP/Contents/MacOS/Luma"
+cp LICENSE THIRD_PARTY.md "$APP/Contents/Resources/"
 if [ -d "$BIN_DIR/Luma_Luma.bundle" ]; then
     ditto "$BIN_DIR/Luma_Luma.bundle" "$APP/Contents/Resources/Luma_Luma.bundle"
 fi
@@ -24,8 +25,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Velun</string>
 <key>CFBundleDisplayName</key><string>Velun</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.19.2</string>
-<key>CFBundleVersion</key><string>28</string>
+<key>CFBundleShortVersionString</key><string>0.19.3</string>
+<key>CFBundleVersion</key><string>29</string>
 <key>LSMinimumSystemVersion</key><string>27.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>

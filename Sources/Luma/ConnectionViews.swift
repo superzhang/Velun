@@ -12,6 +12,8 @@ struct TMDBSettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack { Text("TMDB 海报与影片信息").font(.title2.bold()); Spacer(); Button("完成") { dismiss() }.keyboardShortcut(.cancelAction) }
             Text("根据视频文件名搜索电影或剧集，并显示中文片名、年份与海报。无法确定的候选结果会留给你手动选择。") .foregroundStyle(.secondary)
+            Text("请在 TMDB 账户的 API 设置中申请 API 凭据，然后将 API Read Access Token 粘贴到下方。播放本地或 NAS 视频无需配置令牌。")
+                .font(.callout).foregroundStyle(.secondary)
             LabeledContent("读取访问令牌") { SecureField(store.configured ? "已保存在钥匙串；填写可替换" : "API Read Access Token", text: $token) }.textFieldStyle(.roundedBorder)
             HStack {
                 Button("保存令牌") {

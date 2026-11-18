@@ -15,7 +15,7 @@ No changes made to the logo.
 
 # libmpv / FFmpeg and codec dependencies
 
-libmpv 0.42.0 is obtained from the official Homebrew core formula. The default mpv build is GPL-2.0-or-later; FFmpeg and other dependencies have their own licenses. The C bridge uses libmpv's ISC-licensed client API. Original license files and formula build receipts are copied from installed formulae into the app's Resources/ThirdParty directory. An exact list of bundled library filenames and source installation paths is in Resources/ThirdParty-libraries.json.
+libmpv 0.42.0 is obtained from the official Homebrew core formula. The default mpv build is GPL-2.0-or-later; FFmpeg and other dependencies have their own licenses. The C bridge uses libmpv's ISC-licensed client API. The app copies installed dependency license files into Resources/ThirdParty and records bundled library filenames and Homebrew versions in Resources/ThirdParty-libraries.json.
 
 Sources and build instructions:
 - https://github.com/mpv-player/mpv/tree/v0.42.0
@@ -23,4 +23,4 @@ Sources and build instructions:
 - https://ffmpeg.org/download.html
 - https://github.com/Homebrew/homebrew-core/tree/HEAD/Formula
 
-Before external redistribution, assemble corresponding source and build material for the exact bundled GPL/LGPL dependency versions, and retain the required notices. This artifact is a local development build, not a public release.
+The GitHub release page provides the source for Velun at the release tag. A bundled binary release also needs the corresponding source and build material for the exact third-party versions it ships, including the applicable license notices.

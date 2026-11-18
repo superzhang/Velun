@@ -9,6 +9,8 @@ BIN_DIR="$(swift build -c release --show-bin-path)"
 APP="${LUMA_APP_OUTPUT:-../Velun.app}"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Luma" "$APP/Contents/MacOS/Luma"
+# Keep local source paths in the build tree's debug symbols, outside the app.
+/usr/bin/strip -S "$APP/Contents/MacOS/Luma"
 cp LICENSE THIRD_PARTY.md "$APP/Contents/Resources/"
 if [ -d "$BIN_DIR/Luma_Luma.bundle" ]; then
     ditto "$BIN_DIR/Luma_Luma.bundle" "$APP/Contents/Resources/Luma_Luma.bundle"

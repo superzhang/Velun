@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+.DS_Store
+
+# Local artifacts and credentials
+/Deliverables/
+*.app/
+*.zip
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx

@@ -30,7 +30,9 @@ swift run
 swift test
 ```
 
-要生成应用包，安装有效的 Apple 代码签名证书，再运行 `./scripts/build-app.sh`。如有多张证书，可用 `LUMA_SIGNING_IDENTITY` 指定。应用包生成在上一级目录，名为 `Velun.app`。
+使用 `LUMA_ADHOC_SIGNING=1 ./scripts/build-app.sh` 生成预览应用包。Ad hoc 签名无需开发者账号或签名证书，因此没有签名证书到期的问题。GitHub 下载的版本首次打开时，macOS 可能要求在「系统设置 → 隐私与安全性」为 Velun 选择「仍要打开」。换版本时系统也可能要求重新授权钥匙串访问。 [Apple 的打开方式](https://support.apple.com/zh-cn/102445)
+
+若本机已有签名证书，可用 `./scripts/build-app.sh` 保持稳定的签名身份，多张证书可用 `LUMA_SIGNING_IDENTITY` 指定。应用包默认生成在上一级目录，名为 `Velun.app`。
 
 发布签名可使用 `LUMA_DISTRIBUTION_SIGNING=1 ./scripts/build-app.sh`，需要安装 Developer ID Application 证书。若同时设置 `LUMA_NOTARY_PROFILE` 为已存入钥匙串的 `notarytool` 配置名，脚本会向 Apple 提交公证并将票据附加到应用。
 

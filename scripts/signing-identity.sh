@@ -1,6 +1,14 @@
 #!/bin/zsh
 set -eu
 # LUMA_SIGNING_IDENTITY can pin a certificate in automated builds.
+if [[ "${LUMA_ADHOC_SIGNING:-0}" == "1" ]]; then
+    if [[ "${LUMA_DISTRIBUTION_SIGNING:-0}" == "1" || -n "${LUMA_SIGNING_IDENTITY:-}" ]]; then
+        print -u2 "Choose either LUMA_ADHOC_SIGNING or a certificate signing mode."
+        exit 1
+    fi
+    print -r -- "-"
+    exit 0
+fi
 if [[ "${LUMA_DISTRIBUTION_SIGNING:-0}" == "1" ]]; then
     IDENTITIES="$(security find-identity -v -p codesigning)"
     REQUESTED_IDENTITY="${LUMA_SIGNING_IDENTITY:-}"
@@ -21,7 +29,7 @@ if [[ "${LUMA_DISTRIBUTION_SIGNING:-0}" == "1" ]]; then
 fi
 if [[ -n "${LUMA_SIGNING_IDENTITY:-}" ]]; then
     if [[ "$LUMA_SIGNING_IDENTITY" == "-" ]]; then
-        print -u2 "Luma requires a certificate signature; ad-hoc signing breaks saved Keychain access."
+        print -u2 "Use LUMA_ADHOC_SIGNING=1 to explicitly select the certificate-free preview build."
         exit 1
     fi
     print -r -- "$LUMA_SIGNING_IDENTITY"

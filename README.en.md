@@ -30,7 +30,9 @@ swift run
 swift test
 ```
 
-To build the app bundle, install a valid Apple code-signing certificate and run `./scripts/build-app.sh`. Set `LUMA_SIGNING_IDENTITY` if you have multiple certificates. The script writes `Velun.app` to the parent directory.
+Run `LUMA_ADHOC_SIGNING=1 ./scripts/build-app.sh` to build a preview without a developer account or signing certificate. The ad hoc signature has no certificate expiration date. For GitHub downloads, macOS may require choosing **Open Anyway** for Velun in **System Settings → Privacy & Security** on first launch. Upgrades can require renewed Keychain authorization. [Apple’s opening instructions](https://support.apple.com/en-us/102445)
+
+If you already have a signing certificate, run `./scripts/build-app.sh` to retain a stable signing identity. Set `LUMA_SIGNING_IDENTITY` if you have multiple certificates. The script writes `Velun.app` to the parent directory by default.
 
 Use `LUMA_DISTRIBUTION_SIGNING=1 ./scripts/build-app.sh` for distribution signing with an installed Developer ID Application certificate. Set `LUMA_NOTARY_PROFILE` to a stored `notarytool` Keychain profile to submit the build to Apple and staple the resulting ticket.
 

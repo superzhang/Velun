@@ -5,8 +5,8 @@ if [[ -n "${LUMA_NOTARY_PROFILE:-}" && "${LUMA_DISTRIBUTION_SIGNING:-0}" != "1" 
     print -u2 "Notarization requires LUMA_DISTRIBUTION_SIGNING=1."
     exit 1
 fi
-# A stable certificate identity is required for Keychain access to survive updates.
-# Ad-hoc signatures identify a build by cdhash and must not be used for this app.
+# The default preserves certificate-based identity for Keychain access.
+# Preview builds can explicitly opt in to certificate-free ad-hoc signing.
 SIGNING_IDENTITY="$(scripts/signing-identity.sh)"
 NESTED_IDENTITY="-"
 TIMESTAMP_ARGS=()
@@ -39,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Velun</string>
 <key>CFBundleDisplayName</key><string>Velun</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.23.0</string>
-<key>CFBundleVersion</key><string>35</string>
+<key>CFBundleShortVersionString</key><string>0.23.1</string>
+<key>CFBundleVersion</key><string>36</string>
 <key>LSMinimumSystemVersion</key><string>27.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>

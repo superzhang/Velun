@@ -29,3 +29,7 @@ Velun 沿用早期版本的本机片库路径 `~/Library/Application Support/Lum
 ## 第三方组件与数据
 
 第三方组件、TMDB 数据和图标的来源及许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+## 许可证
+
+Velun 源码采用 [GNU 通用公共许可证第 3 版或任何更新版本](LICENSE)（`GPL-3.0-or-later`）。第三方组件及素材适用各自的许可证，详见 [THIRD_PARTY.md](THIRD_PARTY.md)。

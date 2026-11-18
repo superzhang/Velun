@@ -42,14 +42,14 @@ import Foundation
             case .unwatched: return !group.isWatched
             case .favorites: return group.hasFavorite
             case .top: return !group.isTV && (group.info?.rating ?? 0) > 0
-            case .genres: return !group.isTV && (genre == nil || group.info?.genres?.contains(genre!) == true)
-            case .unmatched: return group.info == nil
+            case .genres: return !group.isTV && (genre == nil || group.genres.contains(genre!))
+            case .unmatched: return group.info == nil && !group.hasLocalTitle
             default: return true
             }
         }.sorted { a, b in
             if destination == .top || sort == "rating" { return (a.info?.rating ?? 0) > (b.info?.rating ?? 0) }
             if sort == "name" { return a.title.localizedStandardCompare(b.title) == .orderedAscending }
-            if sort == "year" { return (a.info?.year ?? "") > (b.info?.year ?? "") }
+            if sort == "year" { return (a.year ?? "") > (b.year ?? "") }
             return a.added > b.added
         }
         self.key = key; result = groups

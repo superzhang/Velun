@@ -137,7 +137,7 @@ struct PosterView: View {
         }.task(id: url) {
             image = nil
             if let fallbackURL, let data = await PosterCache.shared.cachedData(for: fallbackURL), !Task.isCancelled { image = NSImage(data: data) }
-            if let url, let data = try? await PosterCache.shared.data(for: url), !Task.isCancelled { image = NSImage(data: data) }
+            if let url, let data = try? await PosterCache.shared.data(for: url), let primary = NSImage(data: data), !Task.isCancelled { image = primary }
             if image == nil, let fallbackURL, let data = try? await PosterCache.shared.data(for: fallbackURL), !Task.isCancelled { image = NSImage(data: data) }
         }
     }

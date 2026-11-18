@@ -81,11 +81,11 @@ struct MPVControls: View {
     }
     private var menuEntries: [PlayerMenuEntry] {
         let subtitles: [PlayerMenuEntry] = [
-            .action("无", selected: engine.selectedSubtitle == "no") { engine.set("sid", "no") },
-            .action("自动", selected: engine.selectedSubtitle == "auto") { engine.set("sid", "auto") }
-        ] + engine.subtitles.map { track in .action(track.title, selected: engine.selectedSubtitle == track.id) { engine.set("sid", track.id) } }
-        let audio: [PlayerMenuEntry] = [.action("自动", selected: engine.selectedAudio == "auto") { engine.set("aid", "auto") }] + engine.audio.map { track in
-            .action(track.title, selected: engine.selectedAudio == track.id) { engine.set("aid", track.id) }
+            .action("无", selected: engine.selectedSubtitle == "no") { engine.selectSubtitle("no") },
+            .action("自动", selected: engine.selectedSubtitle == "auto") { engine.selectSubtitle("auto") }
+        ] + engine.subtitles.map { track in .action(track.title, selected: engine.selectedSubtitle == track.id) { engine.selectSubtitle(track.id) } }
+        let audio: [PlayerMenuEntry] = [.action("自动", selected: engine.selectedAudio == "auto") { engine.selectAudio("auto") }] + engine.audio.map { track in
+            .action(track.title, selected: engine.selectedAudio == track.id) { engine.selectAudio(track.id) }
         }
         return [
             .heading("高级选项"),
@@ -103,11 +103,11 @@ struct MPVControls: View {
     private var tracks: some View {
         VStack(alignment: .leading, spacing: 17) {
             Text("字幕与音轨").font(.headline)
-            Picker("音轨", selection: Binding(get: { engine.selectedAudio }, set: { engine.set("aid", $0) })) {
+            Picker("音轨", selection: Binding(get: { engine.selectedAudio }, set: { engine.selectAudio($0) })) {
                 Text("自动").tag("auto")
                 ForEach(engine.audio) { Text($0.title).tag($0.id) }
             }
-            Picker("字幕", selection: Binding(get: { engine.selectedSubtitle }, set: { engine.set("sid", $0) })) {
+            Picker("字幕", selection: Binding(get: { engine.selectedSubtitle }, set: { engine.selectSubtitle($0) })) {
                 Text("关闭字幕").tag("no"); Text("自动").tag("auto")
                 ForEach(engine.subtitles) { Text($0.title).tag($0.id) }
             }
@@ -135,7 +135,10 @@ struct NativeAdvancedMenu: View {
     }
     private var entries: [PlayerMenuEntry] {
         let preferences = playback.preferences
-        let subtitles: [PlayerMenuEntry] = [.action("无", selected: playback.nativeSubtitleID == -1) { playback.selectNativeSubtitle(-1) }] + playback.nativeSubtitles.map { track in
+        let subtitles: [PlayerMenuEntry] = [
+            .action("无", selected: playback.nativeSubtitleID == -1) { playback.selectNativeSubtitle(-1) },
+            .action("自动", selected: playback.nativeSubtitleID == Playback.automaticNativeSubtitle) { playback.selectNativeSubtitle(Playback.automaticNativeSubtitle) }
+        ] + playback.nativeSubtitles.map { track in
             .action(track.title, selected: playback.nativeSubtitleID == track.id) { playback.selectNativeSubtitle(track.id) }
         }
         let audio: [PlayerMenuEntry] = [.action("自动", selected: playback.nativeAudioID == -1) { playback.selectNativeAudio(-1) }] + playback.nativeAudio.map { track in

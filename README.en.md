@@ -32,6 +32,8 @@ swift test
 
 To build the app bundle, install a valid Apple code-signing certificate and run `./scripts/build-app.sh`. Set `LUMA_SIGNING_IDENTITY` if you have multiple certificates. The script writes `Velun.app` to the parent directory.
 
+Use `LUMA_DISTRIBUTION_SIGNING=1 ./scripts/build-app.sh` for distribution signing with an installed Developer ID Application certificate. Set `LUMA_NOTARY_PROFILE` to a stored `notarytool` Keychain profile to submit the build to Apple and staple the resulting ticket.
+
 ## Set up TMDB posters
 
 Video playback works without TMDB. For automatic artwork and metadata matching, request credentials with your own TMDB account. The project and release package ship without preconfigured credentials.

@@ -29,12 +29,12 @@ struct EpisodeCarousel: View {
                 HoverScrollRow {
                     LazyHStack(alignment: .top, spacing: spacing) {
                         ForEach(items) { item in
-                            let code = EpisodeCode(item.url.lastPathComponent)
+                            let code = EpisodeCode(item)
                             EpisodeCard(item: item, info: info[code.episode], selected: item.id == selectedID) { select(item) }
                                 .frame(width: cardWidth).id(item.id)
                                 .contextMenu {
-                                    Button(item.isContinuing ? "继续播放" : "播放") { play(item) }
-                                    Button("从头播放") { restart(item) }
+                                    Button(item.isContinuing ? "继续播放" : "播放") { play(item) }.disabled(item.sourceMissing == true)
+                                    Button("从头播放") { restart(item) }.disabled(item.sourceMissing == true)
                                     Divider()
                                     Button(item.isWatched ? "标记为未观看" : "标记为已观看") { setWatched(item, !item.isWatched) }
                                 }
@@ -55,9 +55,9 @@ private struct EpisodeCard: View {
     let selected: Bool
     let select: () -> Void
     @State private var hovered = false
-    private var code: EpisodeCode { EpisodeCode(item.url.lastPathComponent) }
+    private var code: EpisodeCode { EpisodeCode(item) }
     private var title: String {
-        if let name = info?.name, !name.isEmpty { return "\(code.episode). \(name)" }
+        if let name = item.localMetadata?.episode?.title ?? info?.name, !name.isEmpty { return "\(code.episode). \(name)" }
         return code.episode > 0 ? "第 \(code.episode) 集" : item.title
     }
     var body: some View {
@@ -89,16 +89,17 @@ private struct EpisodeCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(selected ? Color.orange : LumaTheme.ink.opacity(hovered ? 0.5 : 0.12), lineWidth: selected ? 3 : 1))
                 Text(title).font(.system(size: 14, weight: selected ? .semibold : .medium)).lineLimit(2, reservesSpace: true).foregroundStyle(.primary)
                 HStack {
-                    if item.isContinuing { Text("继续观看").foregroundStyle(.orange) }
+                    if item.sourceMissing == true { Text("文件缺失").foregroundStyle(.orange) }
+                    else if item.isContinuing { Text("继续观看").foregroundStyle(.orange) }
                     else if item.isWatched { Text("已观看") }
                     else { Text("未观看") }
                     Spacer(minLength: 4)
                     if item.duration > 0 { Text("\(Int(item.duration / 60)) 分钟") }
-                    else if let runtime = info?.runtime, runtime > 0 { Text("\(runtime) 分钟") }
+                    else if let runtime = item.localMetadata?.episode?.runtime ?? info?.runtime, runtime > 0 { Text("\(runtime) 分钟") }
                 }.font(.caption).foregroundStyle(.secondary)
             }.contentShape(Rectangle())
         }.buttonStyle(.plain).onHover { hovered = $0 }
-            .accessibilityLabel("第 \(code.season) 季，\(title)，\(item.isWatched ? "已观看" : item.isContinuing ? "继续观看" : "未观看")")
+            .accessibilityLabel("第 \(code.season) 季，\(title)，\(item.sourceMissing == true ? "文件缺失" : item.isWatched ? "已观看" : item.isContinuing ? "继续观看" : "未观看")")
             .accessibilityAddTraits(selected ? .isSelected : [])
             .help("选择本集后，点击上方播放；右键可直接播放")
     }

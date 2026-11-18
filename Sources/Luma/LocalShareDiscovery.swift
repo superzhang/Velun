@@ -167,6 +167,18 @@ struct DiscoveredShare: Identifiable, Sendable, Equatable {
 }
 
 enum MountedShareScanner {
+    static func directory(for source: URL, on share: DiscoveredShare) -> URL? {
+        let defaults = ["smb": 445, "nfs": 2049]
+        guard let volume = share.mountedURL, let scheme = source.scheme, scheme == share.url.scheme,
+              let host = source.host?.lowercased(), host == share.url.host?.lowercased(),
+              (source.port ?? defaults[scheme]) == (share.url.port ?? defaults[scheme]) else { return nil }
+        let prefix = share.url.pathComponents.filter { $0 != "/" }
+        let sourcePath = source.pathComponents.filter { $0 != "/" }
+        guard sourcePath.starts(with: prefix) else { return nil }
+        return sourcePath.dropFirst(prefix.count).reduce(volume) { $0.appending(component: $1) }
+    }
+
+
     @concurrent static func scan() async -> [DiscoveredShare] {
         let keys: Set<URLResourceKey> = [.volumeURLForRemountingKey, .volumeNameKey, .volumeIsLocalKey]
         let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes]) ?? []

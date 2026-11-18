@@ -7,7 +7,9 @@ struct FeatureBanner: View {
     let details: () -> Void
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            if let url = group.info?.backdrop ?? group.info?.poster { PosterView(url: url) }
+            if let url = group.localBackdrop ?? group.localPoster ?? group.info?.backdrop ?? group.info?.poster {
+                PosterView(url: url, fallbackURL: group.info?.backdrop ?? group.info?.poster)
+            }
             else { LinearGradient(colors: [LumaTheme.sidebar, LumaTheme.canvas], startPoint: .topTrailing, endPoint: .bottomLeading) }
             LinearGradient(stops: [.init(color: .black.opacity(0), location: 0), .init(color: LumaTheme.canvas.opacity(0.65), location: 0.4), .init(color: LumaTheme.canvas, location: 0.85), .init(color: LumaTheme.canvas, location: 1)], startPoint: .top, endPoint: .bottom)
             LinearGradient(colors: [LumaTheme.canvas.opacity(0.85), .clear], startPoint: .leading, endPoint: .trailing)
@@ -15,11 +17,11 @@ struct FeatureBanner: View {
                 Text(group.resume.isContinuing ? "正在观看" : "从你的媒体库精选").font(.caption.weight(.semibold)).foregroundStyle(LumaTheme.ink.opacity(0.7))
                 Text(group.title).font(.system(size: 36, weight: .bold)).lineLimit(2).frame(maxWidth: 650, alignment: .leading)
                 HStack(spacing: 12) {
-                    if let year = group.info?.year, !year.isEmpty { Text(year) }
+                    if let year = group.year, !year.isEmpty { Text(year) }
                     Text(group.isTV ? "电视剧" : "电影")
                     if let rating = group.info?.rating, rating > 0 { Label(String(format: "%.1f", rating), systemImage: "star.fill").foregroundStyle(.orange) }
                 }.font(.subheadline).foregroundStyle(LumaTheme.ink.opacity(0.75))
-                if let overview = group.info?.overview, !overview.isEmpty { Text(overview).font(.system(size: 14)).lineLimit(2).frame(maxWidth: 600, alignment: .leading).foregroundStyle(LumaTheme.ink.opacity(0.8)) }
+                if let overview = group.overview, !overview.isEmpty { Text(overview).font(.system(size: 14)).lineLimit(2).frame(maxWidth: 600, alignment: .leading).foregroundStyle(LumaTheme.ink.opacity(0.8)) }
                 HStack(spacing: 12) {
                     Button(action: play) { Label(group.resume.isContinuing ? "继续播放" : "播放", systemImage: "play.fill").font(.system(size: 14, weight: .semibold)).padding(.horizontal, 24).padding(.vertical, 11).foregroundStyle(LumaTheme.canvas).background(LumaTheme.ink, in: Capsule()) }.buttonStyle(.plain)
                     Button(action: details) { Label("更多信息", systemImage: "info.circle").font(.system(size: 14, weight: .medium)).padding(.horizontal, 22).padding(.vertical, 11).background(LumaTheme.ink.opacity(0.15), in: Capsule()) }.buttonStyle(.plain)
@@ -38,6 +40,7 @@ struct DetailView: View {
     let play: (Media) -> Void
     let match: (Media) -> Void
     let selectionChanged: (Media) -> Void
+    let finderAction: (Media) -> (() -> Void)?
     @State private var detailWidth: CGFloat = 1000
     @State private var technical: MediaTechnicalInfo?
     private var dimensions: VideoDimensions? { technical?.dimensions }
@@ -48,17 +51,18 @@ struct DetailView: View {
     @State private var message = ""
     @State private var episodeInfo: [Int: EpisodeInfo] = [:]
     @State private var loadingEpisodes = false
-    private var currentSeason: Int { seasons.contains(season) ? season : EpisodeCode(group.resume.url.lastPathComponent).season }
-    private var seasons: [Int] { Set(group.items.map { EpisodeCode($0.url.lastPathComponent).season }).sorted() }
-    private var episodes: [Media] { group.items.filter { EpisodeCode($0.url.lastPathComponent).season == currentSeason } }
+    private var currentSeason: Int { seasons.contains(season) ? season : EpisodeCode(group.resume).season }
+    private var seasons: [Int] { Set(group.items.map { EpisodeCode($0).season }).sorted() }
+    private var episodes: [Media] { group.items.filter { EpisodeCode($0).season == currentSeason } }
     private var activeEpisode: Media {
-        episodes.first { $0.id == selectedEpisodeID } ?? episodes.first { $0.id == group.resume.id } ?? episodes.first ?? group.resume
+        episodes.first { $0.id == selectedEpisodeID } ?? episodes.first { $0.id == group.resume.id } ?? episodes.first { $0.sourceMissing != true } ?? episodes.first ?? group.resume
     }
     private var displayedItem: Media { group.isTV ? activeEpisode : group.representative }
-    private var selectedInfo: EpisodeInfo? { group.isTV ? episodeInfo[EpisodeCode(activeEpisode.url.lastPathComponent).episode] : nil }
+    private var selectedInfo: EpisodeInfo? { group.isTV ? episodeInfo[EpisodeCode(activeEpisode).episode] : nil }
     private var overview: String? {
+        if group.isTV, let overview = activeEpisode.localMetadata?.episode?.overview { return overview }
         if let value = selectedInfo?.overview, !value.isEmpty { return value }
-        return group.info?.overview
+        return group.overview
     }
     var body: some View {
         ScrollView {
@@ -70,17 +74,21 @@ struct DetailView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("文件信息").font(.system(size: 20, weight: .semibold))
                     Text(sourceName.map { "在 \($0) 上" } ?? (displayedItem.url.isFileURL ? "本地文件" : "网络视频")).foregroundStyle(.secondary)
+                    if displayedItem.sourceMissing == true { Label("文件缺失", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
                     Text(displayedItem.url.lastPathComponent).font(.system(size: 13)).textSelection(.enabled)
                     HStack(spacing: 12) {
                         Text(displayedItem.format)
                         if displayedItem.duration > 0 { Text(time(displayedItem.duration)) }
                         Text(displayedItem.url.isFileURL ? "原文件播放" : "流媒体播放")
                     }.font(.caption).foregroundStyle(.secondary)
-                    if displayedItem.url.isFileURL { Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([displayedItem.url]) } }
+                    if let reveal = finderAction(displayedItem) { Button("在 Finder 中显示", action: reveal) }
                     if let dimensions { Text("视频分辨率：\(dimensions.width) × \(dimensions.height)（\(dimensions.badge)）").font(.caption).foregroundStyle(.secondary) }
                     if let technical { ForEach(Array(technical.audio.enumerated()), id: \.offset) { _, audio in Text(audio.title).font(.caption).foregroundStyle(.secondary) } }
-                    if let info = group.info { Link("影片信息与图片来自 TMDB", destination: info.creditURL).font(.caption) }
-                    if group.info?.imdbID != nil {
+                    if group.nfo != nil || displayedItem.localMetadata?.episode != nil {
+                        Text("含本地 NFO 元数据").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let info = group.info { Link("TMDB 影片资料", destination: info.creditURL).font(.caption) }
+                    if group.imdbID != nil {
                         Link("IMDb 评分：个人非商业数据集 · 每日缓存", destination: URL(string: "https://data.imdb.com/non-commercial-datasets/")!).font(.caption)
                     }
                     if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.orange) }
@@ -112,7 +120,7 @@ struct DetailView: View {
         }
     }
     private var detailBackdrop: URL? {
-        guard let url = group.info?.backdrop ?? group.info?.poster else { return nil }
+        guard let url = displayedItem.sidecars?.backdrop ?? group.localBackdrop ?? group.info?.backdrop ?? group.poster else { return nil }
         // Preserve the full backdrop at its natural ratio and request a sharper detail image.
         guard url.host == "image.tmdb.org" else { return url }
         return URL(string: url.absoluteString.replacingOccurrences(of: "/t/p/w780/", with: "/t/p/w1280/")) ?? url
@@ -144,16 +152,17 @@ struct DetailView: View {
                 }
             }
         }.clipped().foregroundStyle(.white).environment(\.colorScheme, .dark)
-        .task(id: displayedItem.id) {
+        .task(id: "\(displayedItem.id)-\(displayedItem.url)-\(displayedItem.sourceMissing == true)") {
             technical = nil
+            guard displayedItem.sourceMissing != true else { return }
             do {
                 let result = try await VideoProbe.shared.information(displayedItem)
                 try Task.checkCancellation(); technical = result
             } catch { /* A missing badge never prevents playback. */ }
         }
-        .task(id: group.info?.imdbID) {
+        .task(id: group.imdbID) {
             imdbRating = nil
-            guard let id = group.info?.imdbID else { return }
+            guard let id = group.imdbID else { return }
             do {
                 let result = try await IMDbRatings.shared.rating(id)
                 try Task.checkCancellation(); imdbRating = result
@@ -172,8 +181,10 @@ struct DetailView: View {
             Button { play(group.isTV ? activeEpisode : group.resume) } label: {
                 let item = group.isTV ? activeEpisode : group.resume
                 HStack(spacing: 8) {
-                    if !item.isContinuing { Image(systemName: "play.fill") }
-                    Text(item.isContinuing ? "继续 \(time(item.position))" : "播放").monospacedDigit()
+                    if !item.isContinuing || item.sourceMissing == true {
+                        Image(systemName: item.sourceMissing == true ? "exclamationmark.triangle" : "play.fill")
+                    }
+                    Text(item.sourceMissing == true ? "文件缺失" : (item.isContinuing ? "继续 \(time(item.position))" : "播放")).monospacedDigit()
                 }.font(.system(size: 15, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 44)
                     .foregroundStyle(.black)
                     .background {
@@ -184,14 +195,15 @@ struct DetailView: View {
                             }
                         }.clipShape(Capsule())
                     }.overlay(Capsule().stroke(.white.opacity(0.5)))
-            }.buttonStyle(.plain).accessibilityLabel((group.isTV ? activeEpisode : group.resume).isContinuing ? "继续播放" : "播放")
+            }.buttonStyle(.plain)
+                .disabled((group.isTV ? activeEpisode : group.resume).sourceMissing == true)
             DetailActions(group: group, selected: displayedItem, library: library, playback: playback, match: match, heroStyle: true)
         }
     }
     private var heroTitle: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(group.title).font(.system(size: 29, weight: .bold)).lineLimit(3)
-            if let original = group.info?.originalTitle, original != group.title {
+            if let original = group.originalTitle, original != group.title {
                 Text(original).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -199,8 +211,9 @@ struct DetailView: View {
     private var heroInformation: some View {
         VStack(alignment: .leading, spacing: 13) {
             if group.isTV {
-                let code = EpisodeCode(activeEpisode.url.lastPathComponent)
-                Text("第 \(code.season) 季 · 第 \(code.episode) 集" + (selectedInfo?.name.isEmpty == false ? " - \(selectedInfo!.name)" : ""))
+                let code = EpisodeCode(activeEpisode)
+                let name = activeEpisode.localMetadata?.episode?.title ?? selectedInfo?.name
+                Text("第 \(code.season) 季 · 第 \(code.episode) 集" + (name.map { $0.isEmpty ? "" : " - " + $0 } ?? ""))
                     .font(.system(size: 20, weight: .bold)).lineLimit(2)
             }
             MetadataFlowLayout(spacing: 13, lineSpacing: 8) { technicalInformation; genreLabel }
@@ -224,7 +237,7 @@ struct DetailView: View {
                         }
                     }.buttonStyle(.plain).help(group.isTV && selectedInfo?.rating != nil ? "TMDB 单集评分" : "TMDB 作品评分")
                 }
-                if let id = group.info?.imdbID, IMDbRating.validID(id), let url = URL(string: "https://www.imdb.com/title/\(id)/") {
+                if let id = group.imdbID, IMDbRating.validID(id), let url = URL(string: "https://www.imdb.com/title/\(id)/") {
                     Link(destination: url) {
                         HStack(spacing: 6) {
                             Text("IMDb").font(.system(size: 10, weight: .black)).foregroundStyle(.black).padding(.horizontal, 4).frame(height: 20).background(.yellow, in: RoundedRectangle(cornerRadius: 2))
@@ -238,15 +251,15 @@ struct DetailView: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     @ViewBuilder private var genreLabel: some View {
-        if let genres = group.info?.genres, !genres.isEmpty { Text(genres.joined(separator: "，")).lineLimit(1) }
+        if !group.genres.isEmpty { Text(group.genres.joined(separator: "，")).lineLimit(1) }
     }
     private var technicalInformation: some View {
         Group {
-            if let runtime = group.isTV ? selectedInfo?.runtime : group.info?.runtime, runtime > 0 { Text(runtime >= 60 ? "\(runtime / 60)小时\(runtime % 60)分钟" : "\(runtime)分钟") }
+            if let runtime = group.isTV ? (activeEpisode.localMetadata?.episode?.runtime ?? selectedInfo?.runtime) : group.runtime, runtime > 0 { Text(runtime >= 60 ? "\(runtime / 60)小时\(runtime % 60)分钟" : "\(runtime)分钟") }
             else if displayedItem.duration > 0 { Text("\(Int(displayedItem.duration / 60))分钟") }
-            if let date = selectedInfo?.airDate ?? group.info?.releaseDate, !date.isEmpty { Text(date.replacingOccurrences(of: "-", with: "/")) }
-            else if let year = group.info?.year, !year.isEmpty { Text(year) }
-            if let certification = group.info?.certification { Text(certification).font(.system(size: 11, weight: .bold)).padding(.horizontal, 4).padding(.vertical, 1).overlay(RoundedRectangle(cornerRadius: 3).stroke(.white.opacity(0.5))) }
+            if let date = (group.isTV ? activeEpisode.localMetadata?.episode?.releaseDate : nil) ?? selectedInfo?.airDate ?? group.releaseDate, !date.isEmpty { Text(date.replacingOccurrences(of: "-", with: "/")) }
+            else if let year = group.year, !year.isEmpty { Text(year) }
+            if let certification = group.certification { Text(certification).font(.system(size: 11, weight: .bold)).padding(.horizontal, 4).padding(.vertical, 1).overlay(RoundedRectangle(cornerRadius: 3).stroke(.white.opacity(0.5))) }
             if let dimensions { Text(dimensions.badge).help("\(dimensions.width) × \(dimensions.height)") }
             if let label = technical?.hdrLabel { Text(label).font(.system(size: 11, weight: .bold)) }
             if technical?.hasAtmos == true { Text("Dolby Atmos").font(.system(size: 11, weight: .bold)).help("片源含 Atmos 音轨，实际输出请查看播放器设置") }

@@ -2,6 +2,8 @@
 void *luma_create(int headless);
 void luma_destroy(void *player);
 int luma_load(void *player, const char *path, double start);
+int luma_add_external_subtitle(void *player, const char *path);
+int luma_prefer_external_subtitle(void *player, const char *path);
 int luma_command(void *player, const char *command, const char *argument, const char *argument2);
 int luma_set(void *player, const char *name, const char *value);
 char *luma_get(void *player, const char *name);

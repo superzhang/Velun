@@ -31,6 +31,12 @@ struct EpisodeCode: Comparable, Sendable {
             episode = number(before: "集", fallback: 0)
         }
     }
+    init(_ media: Media) {
+        let record = media.localMetadata?.episode
+        let fallback = Self(media.url.lastPathComponent)
+        season = record?.season ?? fallback.season
+        episode = record?.episode ?? fallback.episode
+    }
     static func < (lhs: Self, rhs: Self) -> Bool { (lhs.season, lhs.episode) < (rhs.season, rhs.episode) }
 }
 
@@ -39,6 +45,16 @@ struct MediaGroup: Identifiable, Sendable {
     let items: [Media]
     let representative: Media
     let info: MovieInfo?
+    let nfo: NFORecord?
+    var hasLocalTitle: Bool { nfo?.title != nil }
+    var originalTitle: String? { nfo?.originalTitle ?? info?.originalTitle }
+    var overview: String? { nfo?.overview ?? info?.overview }
+    var releaseDate: String? { nfo?.releaseDate ?? info?.releaseDate }
+    var certification: String? { nfo?.certification ?? info?.certification }
+    var runtime: Int? { nfo?.runtime ?? info?.runtime }
+    var imdbID: String? { nfo?.imdbID ?? info?.imdbID }
+    var year: String? { nfo?.year ?? nfo?.releaseDate.map { String($0.prefix(4)) } ?? info?.year }
+    var genres: [String] { nfo.map(\.genres).flatMap { $0.isEmpty ? nil : $0 } ?? info?.genres ?? [] }
     let isTV: Bool
     let title: String
     let subtitle: String
@@ -48,26 +64,42 @@ struct MediaGroup: Identifiable, Sendable {
     let added: Date
     let resume: Media
     let searchIndex: String
+    var localPoster: URL? { items.lazy.filter { $0.sourceMissing != true }.compactMap { $0.sidecars?.poster }.first }
+    var localBackdrop: URL? { items.lazy.filter { $0.sourceMissing != true }.compactMap { $0.sidecars?.backdrop }.first }
+    var poster: URL? { localPoster ?? info?.poster }
     init(id: String, items: [Media], codes: [UUID: EpisodeCode]? = nil, template: MediaGroup? = nil) {
         precondition(!items.isEmpty)
         self.id = id; self.items = items; representative = items[0]
         let info = items.lazy.compactMap(\.metadata).first
         self.info = info
-        let parsed = info == nil ? MediaName(items[0].url.deletingPathExtension().lastPathComponent) : nil
-        isTV = info.map { $0.kind == "tv" } ?? parsed!.isTV
-        title = info?.title ?? (isTV ? parsed!.title : items[0].title)
+        nfo = items.lazy.compactMap { $0.localMetadata?.work }.first
+        let episode = items.lazy.compactMap { $0.localMetadata?.episode }.first
+        let knownTitle = nfo?.title ?? episode?.showTitle ?? info?.title
+        let parsed = knownTitle == nil ? MediaName(items[0].url.deletingPathExtension().lastPathComponent) : nil
+        let localKind = nfo?.kind ?? episode?.kind
+        isTV = localKind.map { $0 != .movie } ?? info.map { $0.kind == "tv" } ?? parsed?.isTV ?? false
+        title = knownTitle ?? (isTV ? parsed.flatMap { $0.title.isEmpty ? nil : $0.title } : nil) ?? items[0].title
         if let template { subtitle = template.subtitle }
         else if isTV {
-            let seasons = Set(items.map { codes?[$0.id]?.season ?? EpisodeCode($0.url.lastPathComponent).season })
+            let seasons = Set(items.map { codes?[$0.id]?.season ?? EpisodeCode($0).season })
             subtitle = "\(seasons.count) 季 · \(items.count) 集"
         } else if items.count > 1 { subtitle = "\(items.count) 项内容" }
-        else { subtitle = info?.year.isEmpty == false ? info!.year : items[0].format }
+        else {
+            let year = nfo?.year ?? nfo?.releaseDate.map { String($0.prefix(4)) } ?? info?.year
+            subtitle = year.flatMap { $0.isEmpty ? nil : $0 } ?? items[0].format
+        }
         isWatched = items.allSatisfy(\.isWatched)
         hasFavorite = items.contains(where: \.favorite)
         lastPlayed = items.compactMap(\.lastPlayed).max() ?? .distantPast
         added = items.map(\.added).max() ?? .distantPast
-        resume = items.filter { $0.isContinuing || $0.watchlisted == true }.max { ($0.lastPlayed ?? .distantPast) < ($1.lastPlayed ?? .distantPast) } ?? items.first(where: { !$0.isWatched }) ?? items[0]
-        searchIndex = template?.searchIndex ?? Self.searchKey(([title] + items.map(\.title)).joined(separator: "\n"))
+        let available = items.filter { $0.sourceMissing != true }
+        let playable = available.isEmpty ? items : available
+        resume = playable.filter { $0.isContinuing || $0.watchlisted == true }.max { ($0.lastPlayed ?? .distantPast) < ($1.lastPlayed ?? .distantPast) } ?? playable.first(where: { !$0.isWatched }) ?? playable[0]
+        if let template { searchIndex = template.searchIndex }
+        else {
+            let searchable = items.flatMap { [$0.title, $0.localMetadata?.episode?.title].compactMap { $0 } }
+            searchIndex = Self.searchKey(([title] + searchable).joined(separator: "\n"))
+        }
     }
     static func searchKey(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
@@ -77,10 +109,14 @@ struct MediaGroup: Identifiable, Sendable {
         var buckets: [String: [Media]] = [:]
         for item in items {
             let key: String
-            if let info = item.metadata { key = "\(info.kind):\(info.id)" }
+            if let show = item.localMetadata?.showFile { key = "tv-nfo:\(show.absoluteString)" }
+            else if let info = item.metadata, item.localMetadata?.work?.kind != .movie || info.kind == "movie" { key = "\(info.kind):\(info.id)" }
+            else if let name = item.localMetadata?.episode?.showTitle {
+                key = "tv-nfo-title:\(item.sourceID?.uuidString ?? ""):\(Self.searchKey(name))"
+            }
             else {
                 let parsed = MediaName(item.url.deletingPathExtension().lastPathComponent)
-                key = parsed.isTV && !parsed.title.isEmpty ? "tv-name:\(parsed.title.lowercased())" : item.id.uuidString
+                key = item.localMetadata?.work?.kind != .movie && parsed.isTV && !parsed.title.isEmpty ? "tv-name:\(parsed.title.lowercased())" : item.id.uuidString
             }
             if buckets[key] == nil { order.append(key) }
             buckets[key, default: []].append(item)
@@ -88,7 +124,7 @@ struct MediaGroup: Identifiable, Sendable {
         var result: [Self] = []; result.reserveCapacity(order.count)
         for key in order {
             var files = buckets.removeValue(forKey: key)!
-            let codes = Dictionary(uniqueKeysWithValues: files.map { ($0.id, EpisodeCode($0.url.lastPathComponent)) })
+            let codes = Dictionary(uniqueKeysWithValues: files.map { ($0.id, EpisodeCode($0)) })
             files.sort { a, b in
                 let left = codes[a.id]!; let right = codes[b.id]!
                 return left == right ? a.url.lastPathComponent.localizedStandardCompare(b.url.lastPathComponent) == .orderedAscending : left < right

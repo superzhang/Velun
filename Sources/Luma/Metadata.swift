@@ -298,7 +298,7 @@ struct MatchOutcome: Sendable {
     func matchMissing(_ library: Library, retryReviewed: Bool = false) {
         guard configured else { return }
         if busy { queued = true; return }
-        let groups = library.groupedItems.filter { $0.info == nil && (retryReviewed || $0.items.contains { $0.matchState != "needs-review" }) }.sorted { $0.added > $1.added }
+        let groups = library.groupedItems.filter { $0.info == nil && !$0.hasLocalTitle && (retryReviewed || $0.items.contains { $0.matchState != "needs-review" }) }.sorted { $0.added > $1.added }
         let jobs = groups.map { group in MatchJob(ids: group.items.map(\.id), filename: group.representative.remotePath != nil ? group.representative.title : URL(filePath: group.representative.relativePath ?? group.representative.url.lastPathComponent).deletingPathExtension().lastPathComponent) }
         guard !jobs.isEmpty else { status = "待处理项目已检查完成；可在“待匹配”中手动纠正。"; return }
         busy = true; needsAttention = false; completed = 0; total = jobs.count; status = "正在读取 TMDB 凭据…"
@@ -362,6 +362,9 @@ actor PosterCache {
         return data
     }
     func data(for url: URL) async throws -> Data {
+        if (url.isFileURL || url.scheme == "luma-source"), SidecarIndex.imageExtensions.contains(url.pathExtension.lowercased()) {
+            return try await sidecarData(for: url)
+        }
         guard url.scheme == "https", url.host == "image.tmdb.org", !url.lastPathComponent.isEmpty else { throw TMDBClient.failure("无效的海报地址。") }
         if let cached = memory.object(forKey: url as NSURL) { return cached as Data }
         if let task = pending[url] { return try await task.value }
@@ -384,5 +387,35 @@ actor PosterCache {
         memory.totalCostLimit = 64 * 1024 * 1024
         memory.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
         return data
+    }
+
+    private func sidecarData(for url: URL) async throws -> Data {
+        if let task = pending[url] { return try await task.value }
+        let task = Task { try await Self.readSidecar(url) }
+        pending[url] = task
+        defer { pending[url] = nil }
+        return try await task.value
+    }
+
+    @concurrent private static func readSidecar(_ url: URL) async throws -> Data {
+        let limit = 20_000_000
+        if url.isFileURL {
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            if let data = try file.read(upToCount: limit + 1), data.count <= limit { return data }
+        } else {
+            let resolved = try await RemoteSourceResolver.resolveSidecar(url)
+            let (bytes, response) = try await URLSession.shared.bytes(for: URLRequest(url: resolved, timeoutInterval: 20))
+            guard (response as? HTTPURLResponse)?.statusCode == 200, response.expectedContentLength <= limit else {
+                throw TMDBClient.failure("无法读取来源图片。")
+            }
+            var data = Data()
+            for try await byte in bytes {
+                guard data.count < limit else { throw TMDBClient.failure("来源图片超过 20 MB。") }
+                data.append(byte)
+            }
+            return data
+        }
+        throw TMDBClient.failure("无法读取来源图片，或图片超过 20 MB。")
     }
 }

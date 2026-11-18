@@ -52,6 +52,10 @@ int luma_load(void *p,const char *path,double start) {
     const char *args[]={"loadfile",path,"replace","-1",options,NULL};
     return mpv_command_async(p,0,args);
 }
+int luma_add_external_subtitle(void *player, const char *path) {
+    const char *args[] = {"change-list", "sub-files", "append", path, NULL};
+    return mpv_command(player, args);
+}
 int luma_command(void *p,const char *cmd,const char *a,const char *b) { const char *args[]={cmd,a,b,NULL}; return mpv_command_async(p,0,args); }
 int luma_set(void *p,const char *name,const char *value) { return mpv_set_property_async(p,0,name,MPV_FORMAT_STRING,&value); }
 char *luma_get(void *p,const char *name) { return mpv_get_property_string(p,name); }
@@ -117,4 +121,24 @@ double luma_node_number(const void *data,int index,const char *key) {
     const mpv_node *v=track_field(data,index,key);
     if(!v) return 0;
     return v->format==MPV_FORMAT_DOUBLE ? v->u.double_ : v->format==MPV_FORMAT_INT64 ? (double)v->u.int64 : 0;
+}
+
+int luma_prefer_external_subtitle(void *player, const char *path) {
+    mpv_node tracks;
+    if (mpv_get_property(player, "track-list", MPV_FORMAT_NODE, &tracks) < 0) return 0;
+    int64_t preferred_id = 0;
+    int keep_selection = 0;
+    for (int i = 0; i < luma_track_count(&tracks); i++) {
+        if (strcmp(luma_track_string(&tracks, i, "type"), "sub") != 0) continue;
+        const char *external = luma_track_string(&tracks, i, "external-filename");
+        int matches_path = strcmp(external, path) == 0;
+        const mpv_node *selected = track_field(&tracks, i, "selected");
+        if (selected && selected->format == MPV_FORMAT_FLAG && selected->u.flag &&
+            (!*external || matches_path)) keep_selection = 1;
+        if (matches_path) preferred_id = luma_track_id(&tracks, i);
+    }
+    mpv_free_node_contents(&tracks);
+
+    if (keep_selection) return 1;
+    return preferred_id > 0 && mpv_set_property_async(player, 0, "sid", MPV_FORMAT_INT64, &preferred_id) >= 0;
 }

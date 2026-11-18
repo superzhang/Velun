@@ -203,3 +203,40 @@ import Testing
     media.metadata = MovieInfo(id: 9, kind: "movie", title: "Film", year: "2024", overview: "", poster: nil)
     #expect(MediaGroup.make([media]).first?.isTV == false)
 }
+
+@Test @MainActor func currentBuildReopensPreReleaseLibraryAndSources() throws {
+    let folder = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let libraryFile = folder.appending(component: "library.json")
+    let sourcesFile = folder.appending(component: "sources.json")
+    let source = UUID()
+    let item = UUID()
+    // Use the persisted v2 layout from the public 0.19.3 build.
+    let oldLibrary = """
+    {"version":2,"items":[{"id":"\(item)","url":"file:///Volumes/Videos/Film.mkv","title":"Film","added":100,"position":42,"duration":120,"favorite":true,"playlists":["周末"],"relativePath":"Film.mkv","sourceID":"\(source)"}],"metadata":{"movie:12":{"id":12,"kind":"movie","title":"手动匹配","year":"2024","overview":"片库资料"}},"links":{"\(item)":"movie:12"}}
+    """
+    let oldSources = """
+    [{"id":"\(source)","name":"NAS","url":"smb://nas.local/Videos","connectionKind":"smb","lastScan":100}]
+    """
+    try Data(oldLibrary.utf8).write(to: libraryFile)
+    try Data(oldSources.utf8).write(to: sourcesFile)
+
+    let library = Library(file: libraryFile)
+    let store = SourcesStore(file: sourcesFile)
+    #expect(library.error == nil)
+    #expect(store.error == nil)
+    #expect(store.sources.first?.id == source)
+    #expect(store.sources.first?.lastScan == Date(timeIntervalSinceReferenceDate: 100))
+    #expect(library.items.first?.position == 42)
+    #expect(library.items.first?.favorite == true)
+    #expect(library.items.first?.playlists == ["周末"])
+    #expect(library.items.first?.metadata?.title == "手动匹配")
+    #expect(library.items.first?.sourceID == source)
+
+    library.update(item, position: 50, duration: 120)
+    let reopened = Library(file: libraryFile)
+    #expect(reopened.items.first?.position == 50)
+    #expect(reopened.items.first?.metadata?.id == 12)
+    #expect(reopened.items.first?.sourceID == source)
+}

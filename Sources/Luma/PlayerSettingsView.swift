@@ -72,7 +72,7 @@ struct PlayerSettingsView: View {
                         Toggle("静音", isOn: $preferences.options.muted)
                         HStack { Text("音量"); Slider(value: $preferences.options.volume, in: 0...100).accessibilityLabel("音量"); Text("\(Int(preferences.options.volume))%").monospacedDigit().frame(width: 44) }
                         if let engine = playback.mpv {
-                            Picker("音轨", selection: Binding(get: { engine.selectedAudio }, set: { engine.set("aid", $0) })) {
+                            Picker("音轨", selection: Binding(get: { engine.selectedAudio }, set: { engine.selectAudio($0) })) {
                                 Text("自动").tag("auto")
                                 ForEach(engine.audio) { Text($0.title).tag($0.id) }
                             }
@@ -108,13 +108,13 @@ struct PlayerSettingsView: View {
                     }
                     Section("语言偏好") {
                         Picker("首选音频语言", selection: $preferences.options.audioLanguage) { ForEach(TrackLanguage.allCases) { Text($0.title).tag($0) } }
-                        Text("下次打开视频时自动选择匹配音轨；当前视频可直接在上方切换。").font(.caption).foregroundStyle(.secondary)
+                        Text("为当前视频选过的音轨会在下次播放时恢复。").font(.caption).foregroundStyle(.secondary)
                     }
                     if playback.mpv == nil { enhancedPlayerSection }
                 case 2:
                     Section("字幕轨道") {
                         if let engine = playback.mpv {
-                            Picker("字幕", selection: Binding(get: { engine.selectedSubtitle }, set: { engine.set("sid", $0) })) {
+                            Picker("字幕", selection: Binding(get: { engine.selectedSubtitle }, set: { engine.selectSubtitle($0) })) {
                                 Text("自动").tag("auto"); Text("关闭字幕").tag("no")
                                 ForEach(engine.subtitles) { Text($0.title).tag($0.id) }
                             }
@@ -122,7 +122,7 @@ struct PlayerSettingsView: View {
                             delayControl("字幕同步", value: Binding(get: { engine.subtitleDelay }, set: { engine.setSubtitleDelay($0) }), step: 0.5, bounds: -30...30)
                         } else {
                             Picker("字幕", selection: Binding(get: { playback.nativeSubtitleID }, set: { playback.selectNativeSubtitle($0) })) {
-                                Text("关闭字幕").tag(-1)
+                                Text("自动").tag(Playback.automaticNativeSubtitle); Text("关闭字幕").tag(-1)
                                 ForEach(playback.nativeSubtitles) { Text($0.title).tag($0.id) }
                             }
                         }
@@ -139,7 +139,7 @@ struct PlayerSettingsView: View {
                     Section("语言偏好") {
                         Toggle("默认开启字幕", isOn: $preferences.options.subtitlesEnabled)
                         Picker("首选字幕语言", selection: $preferences.options.subtitleLanguage) { ForEach(TrackLanguage.allCases) { Text($0.title).tag($0) } }
-                        Text("语言偏好在下次打开视频时应用。").font(.caption).foregroundStyle(.secondary)
+                        Text("选过的字幕会在下次播放当前视频时恢复。增强播放器也会记住字幕同步偏移。").font(.caption).foregroundStyle(.secondary)
                     }
                 default:
                     Section("片头片尾") {

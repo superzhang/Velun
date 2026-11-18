@@ -32,6 +32,8 @@ swift test
 
 要生成应用包，安装有效的 Apple 代码签名证书，再运行 `./scripts/build-app.sh`。如有多张证书，可用 `LUMA_SIGNING_IDENTITY` 指定。应用包生成在上一级目录，名为 `Velun.app`。
 
+发布签名可使用 `LUMA_DISTRIBUTION_SIGNING=1 ./scripts/build-app.sh`，需要安装 Developer ID Application 证书。若同时设置 `LUMA_NOTARY_PROFILE` 为已存入钥匙串的 `notarytool` 配置名，脚本会向 Apple 提交公证并将票据附加到应用。
+
 ## 配置 TMDB 海报
 
 播放视频无需 TMDB。要自动匹配海报和影片信息，请用自己的 TMDB 账户申请凭据。项目和发布包均不提供预置凭据。

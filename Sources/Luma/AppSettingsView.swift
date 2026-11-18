@@ -16,6 +16,7 @@ struct AppSettingsView: View {
     @Bindable var playback: Playback
     @Bindable var sources: SourcesStore
     @Bindable var metadata: MetadataStore
+    @AppStorage("library.autoRefreshNAS") private var autoRefreshNAS = true
     @AppStorage("app.appearance") private var appearance = AppAppearance.system.rawValue
     @AppStorage("library.listMode") private var listMode = false
     @AppStorage("library.sort") private var sort = "recent"
@@ -129,7 +130,13 @@ struct AppSettingsView: View {
         VStack(alignment: .leading, spacing: 24) {
             card("共享与文件") {
                 action("添加或管理来源", subtitle: "NAS、媒体服务器与本地文件夹") { showSources = true }
+                separator
+                toggle("自动刷新 NAS", isOn: $autoRefreshNAS)
+                separator
+                action("立即刷新 NAS") { sources.refreshNetwork(library: library, metadata: metadata) }
+                    .disabled(sources.busy || sources.networkFileShares.isEmpty)
             }
+            note("自动刷新在应用打开时运行，播放期间暂缓启动。使用系统连接的共享需先挂载。")
             if !sources.sources.isEmpty {
                 card("已保存的来源") {
                     ForEach(Array(sources.sources.enumerated()), id: \.element.id) { index, source in
@@ -139,7 +146,10 @@ struct AppSettingsView: View {
                 }
             }
             note("支持 SMB、NFS、WebDAV / Alist、FTP 系列、SFTP、DLNA，以及 Plex、Jellyfin、Emby。云盘暂不接入。")
-            if sources.busy { Label(sources.status, systemImage: "arrow.triangle.2.circlepath").font(.callout).foregroundStyle(.secondary) }
+            if !sources.status.isEmpty {
+                Label(sources.status, systemImage: "arrow.triangle.2.circlepath").font(.callout).foregroundStyle(.secondary)
+            }
+            if let error = sources.error { Text(error).font(.callout).foregroundStyle(.orange) }
         }
     }
     private var metadataPage: some View {
@@ -153,6 +163,7 @@ struct AppSettingsView: View {
                     if metadata.busy { metadata.cancel() } else { metadata.matchMissing(library, retryReviewed: true) }
                 }.disabled(!metadata.configured)
             }
+            note("扫描时读取视频同名的 .nfo 文件，剧集还可读取剧集目录中的 tvshow.nfo。重新扫描可更新本地资料。")
             if !metadata.status.isEmpty { note(metadata.status) }
             note("匹配时向 TMDB 发送清理后的片名和年份。模糊结果可在影片详情中手动修正；令牌保存在钥匙串。")
         }

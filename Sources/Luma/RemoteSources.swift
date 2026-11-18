@@ -149,11 +149,24 @@ actor RemoteSources {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let file = folder.appending(path: "rclone.conf"); try Data(config.utf8).write(to: file); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        let data = try await RcloneTool.run(["lsjson", remote, "--config", file.path, "--recursive", "--files-only", "--no-mimetype", "--no-modtime", "--max-depth", "100", "--contimeout", "15s", "--timeout", "45s", "--retries", "1"])
+        let data = try await RcloneTool.run(["lsjson", remote, "--config", file.path, "--recursive", "--files-only", "--no-mimetype", "--no-modtime", "--contimeout", "15s", "--timeout", "45s", "--retries", "1"])
         struct Entry: Decodable { let Path: String; let IsDir: Bool }
         let entries = try JSONDecoder().decode([Entry].self, from: data)
-        let files = entries.filter { !$0.IsDir && Self.safePath($0.Path) && Self.videoExtensions.contains(URL(filePath: $0.Path).pathExtension.lowercased()) }.map { ScannedFile(url: Self.virtualURL(source: source.id, path: $0.Path), relativePath: $0.Path) }
-        return ScanResult(files: files, unreadable: 0)
+        var files: [ScannedFile] = []
+        var sidecars: [URL: SidecarIndex] = [:]
+        for entry in entries where !entry.IsDir && Self.safePath(entry.Path) {
+            try Task.checkCancellation()
+            let url = Self.virtualURL(source: source.id, path: entry.Path)
+            if SidecarIndex.remoteVideoExtensions.contains(url.pathExtension.lowercased()) {
+                files.append(ScannedFile(url: url, relativePath: entry.Path))
+            } else if !SidecarIndex.supports(url) { continue }
+            sidecars[url.deletingLastPathComponent(), default: SidecarIndex()].insert(url)
+        }
+        SidecarIndex.attach(sidecars, to: &files)
+        let enriched = try await NFOReader.enrich(files) { url in
+            try await self.playbackURL(source: source, path: url.pathComponents.dropFirst().joined(separator: "/"))
+        }
+        return ScanResult(files: enriched, unreadable: 0)
     }
     func playbackURL(source: LibrarySource, path: String) async throws -> URL {
         let key = SessionKey(source: source.id, url: source.url, kind: source.kind.rawValue, revision: source.connectionRevision)
@@ -233,7 +246,6 @@ actor RemoteSources {
         let folder = FileManager.default.temporaryDirectory.appending(path: "Luma-Source-\(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]); return folder
     }
-    static let videoExtensions: Set<String> = ["mp4", "m4v", "mov", "mkv", "avi", "ts", "m2ts", "mpg", "mpeg", "webm", "wmv", "flv", "iso"]
     static func safePath(_ path: String) -> Bool { !path.isEmpty && !path.hasPrefix("/") && !path.split(separator: "/").contains("..") && !path.contains("\0") }
     private static func availablePort() throws -> UInt16 {
         let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0); guard socket >= 0 else { throw SourceWorker.failure("无法创建本地播放端口。") }; defer { Darwin.close(socket) }
@@ -249,6 +261,18 @@ actor RemoteSources {
 enum RemoteSourceResolver {
     static func resolve(_ media: Media) async throws -> URL {
         guard media.url.scheme == "luma-source", let id = media.sourceID, let path = media.remotePath ?? media.relativePath else { return media.url }
+        return try await resolve(id: id, path: path)
+    }
+
+    static func resolveSidecar(_ url: URL) async throws -> URL {
+        if url.isFileURL { return url }
+        guard url.scheme == "luma-source", let id = url.host.flatMap(UUID.init(uuidString:)), SidecarIndex.supports(url) else {
+            throw SourceWorker.failure("无效的附属文件地址。")
+        }
+        return try await resolve(id: id, path: url.pathComponents.dropFirst().joined(separator: "/"))
+    }
+
+    private static func resolve(id: UUID, path: String) async throws -> URL {
         let file = URL.applicationSupportDirectory.appending(path: "Luma/sources.json")
         let sources = try JSONDecoder().decode([LibrarySource].self, from: Data(contentsOf: file))
         guard let source = sources.first(where: { $0.id == id }) else { throw SourceWorker.failure("来源配置已移除，请重新添加该来源。") }

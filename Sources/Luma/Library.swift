@@ -22,6 +22,16 @@ struct Media: Identifiable, Codable, Equatable, Sendable {
     var relativePath: String?
     var remotePath: String?
     var lastPlayed: Date?
+    var sidecars: MediaSidecars?
+    var localMetadata: LocalMetadata?
+    var sourceMissing: Bool?
+    var playbackMemory: FilePlaybackMemory?
+    var sourcePath: String { relativePath ?? url.lastPathComponent }
+
+    fileprivate var hasPersonalState: Bool {
+        position > 0 || lastPlayed != nil || watched != nil || favorite || watchlisted == true || personalRating != nil
+            || playlists?.isEmpty == false || collectionName != nil || playbackMemory != nil
+    }
     var isLocalFile: Bool { url.isFileURL && (localFile ?? (sourceID == nil)) }
     var progress: Double { duration > 0 ? min(max(position / duration, 0), 1) : 0 }
     var isWatched: Bool { watched == true || progress >= 0.95 }
@@ -32,6 +42,18 @@ struct Media: Identifiable, Codable, Equatable, Sendable {
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return nil }
         return url
+    }
+}
+
+private enum MissingFileError: LocalizedError {
+    case originalAvailable, replacementUnavailable, replacementInUse
+
+    var errorDescription: String? {
+        switch self {
+        case .originalAvailable: "原记录已恢复或移除，请返回列表查看。"
+        case .replacementUnavailable: "替换文件已不可用，请重新扫描来源。"
+        case .replacementInUse: "替换文件已有观看记录或收藏等设置，请选择其他文件。"
+        }
     }
 }
 
@@ -137,12 +159,34 @@ struct SavedLibrary: Codable, Sendable {
     }
     func add(_ urls: [URL]) {
         var existing = Set(items.map(\.url))
+        var added: [URL] = []
         for url in urls where existing.insert(url).inserted {
+            added.append(url)
             items.append(Media(url: url, title: url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ")))
         }
+        guard !added.isEmpty else { return }
         rebuildItemIndex(); structureRevision += 1
         save()
+        Task { await refreshLocalSidecars(added) }
     }
+
+    func refreshLocalSidecars(_ urls: [URL]? = nil) async {
+        let selected = urls ?? items.filter { $0.sourceID == nil && $0.url.isFileURL }.map(\.url)
+        guard let files = try? await SidecarIndex.localFiles(for: selected.filter(\.isFileURL)),
+              !Task.isCancelled, !files.isEmpty else { return }
+        let discovered = Dictionary(files.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+        var changed = false
+        for i in items.indices {
+            guard items[i].sourceID == nil, let file = discovered[items[i].url] else { continue }
+            let metadata = file.nfoReadFailed ? items[i].localMetadata ?? file.localMetadata : file.localMetadata
+            guard items[i].sidecars != file.sidecars || items[i].localMetadata != metadata else { continue }
+            items[i].sidecars = file.sidecars
+            items[i].localMetadata = metadata
+            changed = true
+        }
+        if changed { structureRevision += 1; save() }
+    }
+
     func applyMetadata(_ metadata: MovieInfo?, to id: UUID) { applyMetadata(metadata, to: [id]) }
     func applyMetadata(_ metadata: MovieInfo?, to ids: [UUID]) {
         let selected = Set(ids)
@@ -168,7 +212,7 @@ struct SavedLibrary: Codable, Sendable {
         }
         if changed { save() }
     }
-    func importSource(_ source: UUID, files: [ScannedFile]) {
+    func importSource(_ source: UUID, files: [ScannedFile], complete: Bool = false) {
         let fallbackLocal = files.first(where: { $0.url.isFileURL && $0.localFile == nil }).map { SourceWorker.localVolume($0.url) } ?? false
         var byPath: [String: Int] = [:]
         var byURL: [URL: Int] = [:]
@@ -176,16 +220,43 @@ struct SavedLibrary: Codable, Sendable {
             byURL[item.url] = i
             if item.sourceID == source, let relative = item.relativePath { byPath[relative] = i }
         }
+        var seen: Set<String> = []
+        var changed = false
         for file in files {
-            if let i = byPath[file.relativePath] ?? byURL[file.url] {
-                items[i].url = file.url; items[i].sourceID = source; items[i].relativePath = file.relativePath; items[i].remotePath = file.remotePath; items[i].localFile = file.localFile ?? fallbackLocal
+            seen.insert(file.relativePath)
+            let index = byPath[file.relativePath] ?? byURL[file.url]
+            var item = index.map { items[$0] } ?? Media(
+                url: file.url,
+                title: file.displayTitle ?? file.url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: ".", with: " ")
+            )
+            item.url = file.url
+            item.sourceID = source
+            item.relativePath = file.relativePath
+            item.remotePath = file.remotePath
+            item.localFile = file.localFile ?? fallbackLocal
+            if complete || file.sidecars != nil { item.sidecars = file.sidecars }
+            if (complete && !file.nfoReadFailed) || (file.localMetadata != nil && (!file.nfoReadFailed || item.localMetadata == nil)) {
+                item.localMetadata = file.localMetadata
+            }
+            item.sourceMissing = nil
+
+            if let index {
+                guard items[index] != item else { continue }
+                items[index] = item
             } else {
-                var item = Media(url: file.url, title: file.url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: ".", with: " "))
-                item.sourceID = source; item.relativePath = file.relativePath; item.remotePath = file.remotePath; item.localFile = file.localFile ?? fallbackLocal
-                if let title = file.displayTitle { item.title = title }
-                byPath[file.relativePath] = items.count; byURL[file.url] = items.count; items.append(item)
+                byPath[file.relativePath] = items.count
+                byURL[file.url] = items.count
+                items.append(item)
+            }
+            changed = true
+        }
+        if complete {
+            for (path, index) in byPath where !seen.contains(path) && items[index].sourceMissing != true {
+                items[index].sourceMissing = true
+                changed = true
             }
         }
+        guard changed else { return }
         rebuildItemIndex(); structureRevision += 1
         save()
     }
@@ -216,6 +287,79 @@ struct SavedLibrary: Codable, Sendable {
         items[i].favorite.toggle(); refreshGroup(for: id); save(invalidateGroups: false)
     }
     func remove(_ id: UUID) { items.removeAll { $0.id == id }; rebuildItemIndex(); structureRevision += 1; save() }
+    func replacements(for original: Media) -> [Media] {
+        guard let id = original.sourceID else { return [] }
+        return items.filter {
+            $0.sourceID == id && $0.sourceMissing != true && $0.relativePath != nil
+                && $0.relativePath != original.relativePath && !$0.hasPersonalState
+        }
+    }
+
+    func relinkMissing(_ id: UUID, to replacementID: UUID) throws {
+        guard let originalIndex = itemIndex[id], items[originalIndex].sourceMissing == true else {
+            throw MissingFileError.originalAvailable
+        }
+        let original = items[originalIndex]
+        guard let replacementIndex = itemIndex[replacementID], let sourceID = original.sourceID else {
+            throw MissingFileError.replacementUnavailable
+        }
+        let replacement = items[replacementIndex]
+        guard replacement.sourceID == sourceID, replacement.sourceMissing != true,
+              let path = replacement.relativePath, path != original.relativePath else {
+            throw MissingFileError.replacementUnavailable
+        }
+        guard !replacement.hasPersonalState else { throw MissingFileError.replacementInUse }
+
+        var relinked = original
+        relinked.url = replacement.url
+        relinked.relativePath = path
+        relinked.remotePath = replacement.remotePath
+        relinked.localFile = replacement.localFile
+        relinked.sidecars = replacement.sidecars
+        relinked.localMetadata = replacement.localMetadata
+        relinked.sourceMissing = nil
+        if relinked.metadata == nil {
+            relinked.metadata = replacement.metadata
+            relinked.matchState = replacement.matchState
+            relinked.matchCheckedAt = replacement.matchCheckedAt
+        }
+
+        items[originalIndex] = relinked
+        items.remove(at: replacementIndex)
+        rebuildItemIndex()
+        structureRevision += 1
+        save()
+    }
+
+    @discardableResult
+    func removeMissing(_ ids: Set<UUID>) -> Int {
+        let previousCount = items.count
+        items.removeAll { $0.sourceMissing == true && ids.contains($0.id) }
+        let removed = previousCount - items.count
+        if removed > 0 {
+            rebuildItemIndex()
+            structureRevision += 1
+            save()
+        }
+        return removed
+    }
+
+    func playbackMemory(for id: UUID) -> FilePlaybackMemory {
+        itemIndex[id].flatMap { items[$0].playbackMemory } ?? FilePlaybackMemory()
+    }
+
+    func updatePlaybackMemory(for id: UUID, _ update: (inout FilePlaybackMemory) -> Void) {
+        guard let index = itemIndex[id] else { return }
+        var memory = items[index].playbackMemory ?? FilePlaybackMemory()
+        update(&memory)
+        if memory.enhanced == EnhancedPlaybackMemory() { memory.enhanced = nil }
+        let saved = memory == FilePlaybackMemory() ? nil : memory
+        guard items[index].playbackMemory != saved else { return }
+        items[index].playbackMemory = saved
+        refreshGroup(for: id)
+        save(invalidateGroups: false)
+    }
+
     func reset(_ id: UUID) {
         guard let i = itemIndex[id] else { return }
         items[i].position = 0; items[i].watched = false; items[i].lastPlayed = nil; refreshGroup(for: id); save(invalidateGroups: false)

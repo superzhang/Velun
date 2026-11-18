@@ -125,7 +125,7 @@ private struct PlaybackEpisodeList: View {
     @State private var season: Int
 
     init(items: [Media], currentID: UUID, select: @escaping (UUID) -> Void) {
-        let episodes = items.map { Episode(media: $0, code: EpisodeCode($0.url.lastPathComponent)) }
+        let episodes = items.map { Episode(media: $0, code: EpisodeCode($0)) }
         seasons = Dictionary(grouping: episodes, by: \.code.season)
         self.currentID = currentID
         self.select = select

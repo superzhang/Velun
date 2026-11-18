@@ -2,6 +2,31 @@ import Foundation
 import Testing
 @testable import Luma
 
+@Test func finderResolvesMountedSMBAndReportsMissingFiles() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    let directory = root.appending(component: "影视 100%")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = directory.appending(component: "影片 #1.mkv")
+    try Data().write(to: file)
+    let source = LibrarySource(name: "Fixture", url: URL(string: "smb://finder-fixture.invalid/Movies")!, connectionKind: .smb, directSMB: true)
+    let relativePath = "影视 100%/影片 #1.mkv"
+    var media = Media(url: RemoteSources.virtualURL(source: source.id, path: relativePath), title: "Fixture")
+    media.relativePath = relativePath
+    let mount: @Sendable (URL) async throws -> URL = { _ in root }
+
+    #expect(FinderLocation.isAvailable(for: media, source: source))
+    #expect(try await FinderLocation.resolve(media, source: source, mount: mount) == file)
+    media.url = root.appending(component: "old-mount").appending(component: "影片 #1.mkv")
+    #expect(try await FinderLocation.resolve(media, source: source, mount: mount) == file)
+    media.url = file
+    #expect(try await FinderLocation.resolve(media, source: nil) == file)
+    try FileManager.default.removeItem(at: file)
+    await #expect(throws: NSError.self) {
+        _ = try await FinderLocation.resolve(media, source: source, mount: mount)
+    }
+}
+
 @Test func smbAcceptsDiscoveredServerAndRejectsCredentialsInURL() throws {
     #expect(SMBClient.endpoint("fixture-nas.local")?.host == "fixture-nas.local")
     #expect(SMBClient.endpoint("smb://nas.local:14455/")?.port == 14455)
@@ -44,4 +69,90 @@ func smbAuthenticatesBrowsesScansAndSeeks() async throws {
         _ = try await SMBClient.browse(root, credentials: SourceCredentials(username: "luma-test", password: "wrong"))
     }
     } catch { await remote.stopAll(); throw error }
+}
+
+@Test @MainActor func automaticRefreshRecordsUnmountedSourceWithoutMarkingItsFilesMissing() async throws {
+    let folder = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let library = Library(file: folder.appending(component: "library.json"))
+    let store = SourcesStore(file: folder.appending(component: "sources.json"))
+    let source = store.add(name: "Offline", url: URL(string: "smb://velun-fixture.invalid/Movies")!, kind: .smb)
+    let mediaURL = folder.appending(component: "Movie.mkv")
+    library.importSource(source.id, files: [ScannedFile(url: mediaURL, relativePath: mediaURL.lastPathComponent)], complete: true)
+    let suiteName = "Velun-Test-\(UUID())"
+    let preferences = try #require(UserDefaults(suiteName: suiteName))
+    defer { preferences.removePersistentDomain(forName: suiteName) }
+    let metadata = MetadataStore(defaults: preferences)
+    metadata.autoMatch = false
+
+    #expect(store.refreshNetwork(library: library, metadata: metadata))
+    try await awaitSourceScan(store)
+    #expect(store.scanIssues[source.id] == .notMounted)
+    #expect(store.networkIssueCount == 1)
+    #expect(library.items.count == 1)
+    #expect(library.items.first?.sourceMissing == nil)
+    #expect(store.sources.first?.lastScan == nil)
+
+    let updated = store.update(source, name: source.name, url: folder.appending(component: "recovered"), kind: .smb)
+    #expect(store.scanIssues[source.id] == nil)
+    store.scan(updated, library: library, metadata: metadata)
+    try await awaitSourceScan(store)
+    #expect(store.scanIssues[source.id] != nil)
+    #expect(library.items.first?.sourceMissing == nil)
+
+    try FileManager.default.createDirectory(at: updated.url, withIntermediateDirectories: true)
+    try Data().write(to: updated.url.appending(component: "Movie.mkv"))
+    store.scan(updated, library: library, metadata: metadata)
+    try await awaitSourceScan(store)
+    #expect(store.scanIssues[source.id] == nil)
+    #expect(store.sources.first?.lastScan != nil)
+    #expect(library.items.first?.url.lastPathComponent == "Movie.mkv")
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["VELUN_ACCEPT_MOUNTED_SMB"] == "1")) @MainActor
+func automaticallyScansExistingSMBMountReadOnly() async throws {
+    let shares = await MountedShareScanner.scan().filter { $0.kind == .smb }
+    try #require(!shares.isEmpty)
+    let selected = try #require(await smallMountedSMBDirectory(shares))
+    let folder = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let library = Library(file: folder.appending(component: "library.json"))
+    let store = SourcesStore(file: folder.appending(component: "sources.json"))
+    let source = store.add(name: "SMB acceptance", url: selected, kind: .smb)
+    let suiteName = "Velun-Test-\(UUID())"
+    let preferences = try #require(UserDefaults(suiteName: suiteName))
+    defer { preferences.removePersistentDomain(forName: suiteName) }
+    let metadata = MetadataStore(defaults: preferences)
+    metadata.autoMatch = false
+
+    #expect(store.refreshNetwork(library: library, metadata: metadata))
+    try await awaitSourceScan(store)
+    #expect(store.scanIssues[source.id] == nil)
+    #expect(store.sources.first?.lastScan != nil)
+    #expect(library.items.allSatisfy { !$0.isLocalFile })
+}
+
+@MainActor private func awaitSourceScan(_ store: SourcesStore) async throws {
+    let clock = ContinuousClock()
+    let timeout = clock.now + .seconds(10)
+    while store.busy, clock.now < timeout { try await Task.sleep(for: .milliseconds(20)) }
+    if store.busy { store.cancel() }
+    try #require(!store.busy)
+}
+
+@concurrent private func smallMountedSMBDirectory(_ shares: [DiscoveredShare]) async -> URL? {
+    let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
+    var folders = shares.compactMap { share in share.mountedURL.map { (local: $0, remote: share.url) } }
+    for _ in 0..<30 {
+        guard !folders.isEmpty else { break }
+        let folder = folders.removeFirst()
+        guard let files = try? FileManager.default.contentsOfDirectory(at: folder.local, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+        let directories = files.filter { file in
+            let values = try? file.resourceValues(forKeys: Set(keys))
+            return values?.isDirectory == true && values?.isSymbolicLink != true
+        }
+        if files.count <= 100 && directories.isEmpty { return folder.remote }
+        folders += directories.prefix(12).map { ($0, folder.remote.appending(component: $0.lastPathComponent)) }
+    }
+    return nil
 }

@@ -123,11 +123,11 @@ enum AutoSkip {
         return candidates.count == 1 ? candidates[0] : nil
     }
     static func references(for media: Media, in group: MediaGroup) -> [Media] {
-        let current = EpisodeCode(media.url.lastPathComponent)
+        let current = EpisodeCode(media)
         var seen = Set([current.episode])
-        return group.items.filter { EpisodeCode($0.url.lastPathComponent).season == current.season }
-            .sorted { abs(EpisodeCode($0.url.lastPathComponent).episode - current.episode) < abs(EpisodeCode($1.url.lastPathComponent).episode - current.episode) }
-            .filter { seen.insert(EpisodeCode($0.url.lastPathComponent).episode).inserted }
+        return group.items.filter { EpisodeCode($0).season == current.season }
+            .sorted { abs(EpisodeCode($0).episode - current.episode) < abs(EpisodeCode($1).episode - current.episode) }
+            .filter { seen.insert(EpisodeCode($0).episode).inserted }
             .prefix(2).map { $0 }
     }
     static var executable: URL {

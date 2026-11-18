@@ -51,7 +51,5 @@ for helper in helpers:
 # No absolute Homebrew paths are allowed in load commands.
 for file in [main, *helpers, *frameworks.glob('*.dylib')]:
     assert not any(dep.startswith('/opt/homebrew/') for dep in dependencies(file)), file
-for file in frameworks.glob('*.dylib'):
-    subprocess.run(['codesign','--force','--sign','-',str(file)],check=True,stderr=subprocess.DEVNULL)
 (app / 'Contents/Resources/ThirdParty-libraries.json').write_text(json.dumps(inventory,indent=2))
 print(f'Bundled {len(seen)} dynamic libraries')

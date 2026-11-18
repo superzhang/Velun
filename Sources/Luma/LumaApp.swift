@@ -6,6 +6,7 @@ import AVFoundation
 @main struct LumaApp: App {
     @NSApplicationDelegateAdaptor(LumaApplicationDelegate.self) private var appDelegate
     @AppStorage("app.appearance") private var appearance = AppAppearance.system.rawValue
+    @AppStorage("library.autoRefreshNAS") private var autoRefreshNAS = true
     @State private var library: Library
     @State private var sources = SourcesStore()
     @State private var metadata = MetadataStore()
@@ -32,6 +33,19 @@ import AVFoundation
                     library.add([url]); playback.open(library.items.first { $0.url == url }!)
                 }
                 .task { library.updateSourceLocality(await SourceWorker.sourceLocality(sources.sources)) }
+                .task { await library.refreshLocalSidecars() }
+                .task(id: autoRefreshNAS) {
+                    guard autoRefreshNAS else { return }
+                    do {
+                        try await Task.sleep(for: .seconds(3))
+                        while !Task.isCancelled {
+                            let started = playback.media == nil && sources.refreshNetwork(library: library, metadata: metadata)
+                            try await Task.sleep(for: .seconds(started ? 900 : 60))
+                        }
+                    } catch is CancellationError {
+                        // The window closed or automatic refresh was switched off.
+                    } catch { }
+                }
                 .task {
                     let args = ProcessInfo.processInfo.arguments
                     if let index = args.firstIndex(of: "--play"), args.indices.contains(index + 1) {

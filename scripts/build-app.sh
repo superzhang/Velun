@@ -1,9 +1,21 @@
 #!/bin/zsh
 set -eu
 cd "$(dirname "$0")/.."
+if [[ -n "${LUMA_NOTARY_PROFILE:-}" && "${LUMA_DISTRIBUTION_SIGNING:-0}" != "1" ]]; then
+    print -u2 "Notarization requires LUMA_DISTRIBUTION_SIGNING=1."
+    exit 1
+fi
 # A stable certificate identity is required for Keychain access to survive updates.
 # Ad-hoc signatures identify a build by cdhash and must not be used for this app.
 SIGNING_IDENTITY="$(scripts/signing-identity.sh)"
+NESTED_IDENTITY="-"
+TIMESTAMP_ARGS=()
+RUNTIME_ARGS=()
+if [[ "${LUMA_DISTRIBUTION_SIGNING:-0}" == "1" ]]; then
+    NESTED_IDENTITY="$SIGNING_IDENTITY"
+    TIMESTAMP_ARGS=(--timestamp)
+    RUNTIME_ARGS=(--options runtime)
+fi
 swift build -c release
 BIN_DIR="$(swift build -c release --show-bin-path)"
 APP="${LUMA_APP_OUTPUT:-../Velun.app}"
@@ -27,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Velun</string>
 <key>CFBundleDisplayName</key><string>Velun</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.19.3</string>
-<key>CFBundleVersion</key><string>29</string>
+<key>CFBundleShortVersionString</key><string>0.23.0</string>
+<key>CFBundleVersion</key><string>35</string>
 <key>LSMinimumSystemVersion</key><string>27.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
@@ -37,7 +49,6 @@ PLIST
 mkdir -p "$APP/Contents/Helpers" "$APP/Contents/Resources/ThirdParty/rclone"
 install -m 755 /opt/homebrew/bin/rclone "$APP/Contents/Helpers/rclone"
 cp /opt/homebrew/opt/rclone/COPYING "$APP/Contents/Resources/ThirdParty/rclone/COPYING"
-codesign --force --sign - "$APP/Contents/Helpers/rclone"
 install -m 755 /opt/homebrew/bin/ffmpeg "$APP/Contents/Helpers/ffmpeg"
 install -m 755 /opt/homebrew/bin/ffprobe "$APP/Contents/Helpers/ffprobe"
 # Compile the Icon Composer document so macOS chooses its own mask, scale and appearance.
@@ -55,8 +66,23 @@ info.write_bytes(plistlib.dumps(metadata))
 PYICON
 rm "$ICON_INFO"
 python3 scripts/bundle-libs.py "$APP"
-codesign --force --sign - "$APP/Contents/Helpers/ffmpeg"
-codesign --force --sign - "$APP/Contents/Helpers/ffprobe"
-codesign --force --sign "$SIGNING_IDENTITY" "$APP"
+for library in "$APP"/Contents/Frameworks/*.dylib; do
+    codesign --force --sign "$NESTED_IDENTITY" "${TIMESTAMP_ARGS[@]}" "$library" 2>/dev/null ||
+        { print -u2 "Failed to sign $library"; exit 1; }
+done
+for helper in rclone ffmpeg ffprobe; do
+    codesign --force --sign "$NESTED_IDENTITY" "${TIMESTAMP_ARGS[@]}" "${RUNTIME_ARGS[@]}" "$APP/Contents/Helpers/$helper"
+done
+codesign --force --sign "$SIGNING_IDENTITY" "${TIMESTAMP_ARGS[@]}" "${RUNTIME_ARGS[@]}" "$APP"
 codesign --verify --deep --strict "$APP"
+
+if [[ -n "${LUMA_NOTARY_PROFILE:-}" ]]; then
+    NOTARY_DIR="$(mktemp -d -t velun-notarization)"
+    trap 'rm -rf -- "$NOTARY_DIR"' EXIT
+    ditto -c -k --keepParent "$APP" "$NOTARY_DIR/Velun.zip"
+    xcrun notarytool submit "$NOTARY_DIR/Velun.zip" --keychain-profile "$LUMA_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    codesign --verify --deep --strict "$APP"
+fi
 echo "Built: $APP"

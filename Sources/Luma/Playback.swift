@@ -13,6 +13,7 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     }
 
     let preferences: PlaybackPreferences
+    static let automaticNativeSubtitle = -2
     private(set) var nativeAudio: [PlayerTrackChoice] = []
     private(set) var nativeSubtitles: [PlayerTrackChoice] = []
     private(set) var nativeAudioID = -1
@@ -25,6 +26,7 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     var error: String?
     private(set) var technicalInfo: MediaTechnicalInfo?
     private var resolvedPlaybackURL: URL?
+    private var resolvedSubtitles: [URL] = []
     private var usingNativeAirPlay = false
     private(set) var preparingAirPlay = false
     private(set) var airPlayMessage: String?
@@ -38,14 +40,15 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     private var queueLoops = false
     var selectableEpisodes: [Media] {
         guard let media, let group = library.group(containing: media.id), group.isTV else { return [] }
-        return group.items
+        return group.items.filter { $0.sourceMissing != true }
     }
     func selectEpisode(_ id: UUID) {
         guard id != media?.id, let episode = selectableEpisodes.first(where: { $0.id == id }) else { return }
         open(episode)
     }
     func playQueue(_ items: [Media], shuffled: Bool, loop: Bool) {
-        let ordered = shuffled ? items.shuffled() : items
+        let available = items.filter { $0.sourceMissing != true }
+        let ordered = shuffled ? available.shuffled() : available
         guard let first = ordered.first else { return }
         queue = ordered.map(\.id); queueLoops = loop
         preferences.options.repeatOne = false
@@ -60,8 +63,8 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         }
         guard let group = library.group(containing: media.id), group.isTV,
               let index = group.items.firstIndex(where: { $0.id == media.id }) else { return nil }
-        let current = EpisodeCode(media.url.lastPathComponent)
-        return group.items.prefix(index).reversed().first { current.episode == 0 || EpisodeCode($0.url.lastPathComponent) < current }
+        let current = EpisodeCode(media)
+        return group.items.prefix(index).reversed().first { $0.sourceMissing != true && (current.episode == 0 || EpisodeCode($0) < current) }
     }
     var nextEpisode: Media? {
         if !queue.isEmpty {
@@ -75,10 +78,10 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     nonisolated static func nextEpisode(after id: UUID, groups: [MediaGroup]) -> Media? {
         guard let group = groups.first(where: { $0.isTV && $0.items.contains(where: { $0.id == id }) }),
               let index = group.items.firstIndex(where: { $0.id == id }), group.items.indices.contains(index + 1) else { return nil }
-        let current = EpisodeCode(group.items[index].url.lastPathComponent)
+        let current = EpisodeCode(group.items[index])
         return group.items.dropFirst(index + 1).first { candidate in
-            let code = EpisodeCode(candidate.url.lastPathComponent)
-            return current.episode == 0 || code > current
+            let code = EpisodeCode(candidate)
+            return candidate.sourceMissing != true && (current.episode == 0 || code > current)
         }
     }
     func finished() {
@@ -172,6 +175,10 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         usingNativeAirPlay = preferAirPlay
         if !queue.contains(media.id) { queue = []; queueLoops = false }
         self.media = media
+        guard media.sourceMissing != true else {
+            error = "来源中找不到此文件。文件恢复后可重新扫描来源。"
+            return
+        }
         loading = true
         preparation = Task { [self] in
             do {
@@ -180,6 +187,15 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
                 else { resolved = try await RemoteSourceResolver.resolve(media) }
                 try Task.checkCancellation()
                 resolvedPlaybackURL = resolved
+                var sidecars = media.sidecars
+                if media.sourceID == nil && media.url.isFileURL { sidecars = await SidecarIndex.local(for: media.url) }
+                var subtitles: [URL] = []
+                for subtitle in SidecarIndex.prioritizedSubtitles(sidecars?.subtitles ?? [], for: media.url, language: preferences.options.subtitleLanguage) {
+                    try Task.checkCancellation()
+                    if let url = try? await RemoteSourceResolver.resolveSidecar(subtitle) { subtitles.append(url) }
+                }
+                try Task.checkCancellation()
+                resolvedSubtitles = subtitles
                 let technical = try? await VideoProbe.shared.information(media)
                 try Task.checkCancellation()
                 technicalInfo = technical
@@ -187,7 +203,8 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
                 let nativeImmersive = preferences.options.nativeHDRPreferred && (technical?.isHDR == true || technical?.hasAtmos == true)
                 let requiresEnhancedFormat = media.url.pathExtension.lowercased() == "mkv" || technical?.hasSystemCompatibleAudio == false
                 let prefersEnhanced = preferences.options.audioMode != .automatic || (preferences.options.preferEnhancedPlayer && !nativeImmersive)
-                if requiresEnhancedFormat || (!preferAirPlay && prefersEnhanced) {
+                let canUseEnhancedSubtitles = !nativeImmersive && technical?.requiresNativeDolbyVision != true && !subtitles.isEmpty
+                if requiresEnhancedFormat || (!preferAirPlay && (prefersEnhanced || canUseEnhancedSubtitles)) {
                     startMPV(stream); return
                 }
                 if resolved.isFileURL && !FileManager.default.fileExists(atPath: resolved.path) { throw CocoaError(.fileNoSuchFile) }
@@ -279,7 +296,12 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
             error = "此 Dolby Vision 片源没有可直接显示的 HDR 兼容层。请使用系统兼容的 MP4 / MOV，或创建无损封装副本，避免紫绿偏色。"
             return
         }
-        mpv = MPVEngine(url: media.url, resume: media.isContinuing ? media.position : 0, options: preferences.options, paused: paused)
+        let id = media.id
+        let memory = library.playbackMemory(for: id).enhanced ?? EnhancedPlaybackMemory()
+        mpv = MPVEngine(url: media.url, resume: media.isContinuing ? media.position : 0, options: preferences.options,
+                        paused: paused, externalSubtitles: resolvedSubtitles, memory: memory) { [weak self] memory in
+            self?.library.updatePlaybackMemory(for: id) { $0.enhanced = memory }
+        }
         loading = false
         applyPreferences()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in Task { @MainActor in self?.saveProgress() } }
@@ -299,8 +321,11 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     }
     func resetSettings() {
         preferences.reset(); autoAdvance = true; autoSkipEnabled = true
-        mpv?.setAudioDelay(0); mpv?.setSubtitleDelay(0)
-        mpv?.set("aid", "auto"); mpv?.set("sid", "auto")
+        if let media { library.updatePlaybackMemory(for: media.id) { $0 = FilePlaybackMemory() } }
+        mpv?.setAudioDelay(0)
+        mpv?.forgetFileChoices(options: preferences.options)
+        selectNativeAudio(-1)
+        selectNativeSubtitle(Self.automaticNativeSubtitle)
         applyPreferences()
     }
     func useEnhancedPlayer() {
@@ -310,8 +335,8 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         let duration = player.currentItem?.duration.seconds ?? current.duration
         if position.isFinite { current.position = position }
         if duration.isFinite { current.duration = duration }
-        let technical = technicalInfo, resolved = resolvedPlaybackURL
-        close(clearQueue: false); media = current; technicalInfo = technical; resolvedPlaybackURL = resolved
+        let technical = technicalInfo, resolved = resolvedPlaybackURL, subtitles = resolvedSubtitles
+        close(clearQueue: false); media = current; technicalInfo = technical; resolvedPlaybackURL = resolved; resolvedSubtitles = subtitles
         var stream = current; stream.url = resolved ?? current.url
         startMPV(stream, paused: wasPaused)
     }
@@ -347,35 +372,89 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         audioGroup = audio; subtitleGroup = subtitles
         nativeAudio = audio?.options.enumerated().map { PlayerTrackChoice(id: $0.offset, title: $0.element.displayName) } ?? []
         nativeSubtitles = subtitles?.options.enumerated().map { PlayerTrackChoice(id: $0.offset, title: $0.element.displayName) } ?? []
-        func preferred(in group: AVMediaSelectionGroup, language: TrackLanguage) -> AVMediaSelectionOption? {
-            let aliases = language.mpvValue.lowercased().split(separator: ",")
-            return group.options.first { option in
-                let code = (option.extendedLanguageTag ?? option.locale?.identifier ?? "").lowercased()
-                return aliases.contains { code.hasPrefix($0) }
-            }
-        }
+        let memory = media.map { library.playbackMemory(for: $0.id) }
         if let audio {
-            if let option = preferred(in: audio, language: preferences.options.audioLanguage) { item.select(option, in: audio) }
-            else { item.selectMediaOptionAutomatically(in: audio) }
+            if let option = memory?.nativeAudio.flatMap({ Self.restoreNativeOption($0, in: audio) }) {
+                item.select(option, in: audio)
+            } else {
+                selectPreferredNativeOption(in: audio, item: item, language: preferences.options.audioLanguage)
+            }
             nativeAudioID = audio.options.firstIndex { $0 == item.currentMediaSelection.selectedMediaOption(in: audio) } ?? -1
         }
         if let subtitles {
-            if !preferences.options.subtitlesEnabled { item.select(nil, in: subtitles) }
-            else if let option = preferred(in: subtitles, language: preferences.options.subtitleLanguage) { item.select(option, in: subtitles) }
-            else { item.selectMediaOptionAutomatically(in: subtitles) }
+            switch memory?.nativeSubtitles {
+            case .off:
+                item.select(nil, in: subtitles)
+            case .track(let data):
+                if let option = Self.restoreNativeOption(data, in: subtitles) { item.select(option, in: subtitles) }
+                else { selectDefaultNativeSubtitle(in: subtitles, item: item) }
+            case nil:
+                selectDefaultNativeSubtitle(in: subtitles, item: item)
+            }
             nativeSubtitleID = subtitles.options.firstIndex { $0 == item.currentMediaSelection.selectedMediaOption(in: subtitles) } ?? -1
         }
     }
-    func selectNativeAudio(_ id: Int) {
-        guard let audioGroup, let item = player.currentItem else { return }
-        if id == -1 {
-            item.selectMediaOptionAutomatically(in: audioGroup)
-            nativeAudioID = audioGroup.options.firstIndex { $0 == item.currentMediaSelection.selectedMediaOption(in: audioGroup) } ?? -1
-        } else if audioGroup.options.indices.contains(id) { item.select(audioGroup.options[id], in: audioGroup); nativeAudioID = id }
+
+    private static func restoreNativeOption(_ data: Data, in group: AVMediaSelectionGroup) -> AVMediaSelectionOption? {
+        guard let propertyList = try? PropertyListSerialization.propertyList(from: data, format: nil) else { return nil }
+        return group.mediaSelectionOption(withPropertyList: propertyList)
     }
+
+    private static func encodeNativeOption(_ option: AVMediaSelectionOption) -> Data? {
+        try? PropertyListSerialization.data(fromPropertyList: option.propertyList(), format: .binary, options: 0)
+    }
+
+    private func selectPreferredNativeOption(in group: AVMediaSelectionGroup, item: AVPlayerItem, language: TrackLanguage) {
+        let aliases = language.mpvValue.lowercased().split(separator: ",")
+        let option = group.options.first { option in
+            let code = (option.extendedLanguageTag ?? option.locale?.identifier ?? "").lowercased()
+            return aliases.contains { code.hasPrefix($0) }
+        }
+        if let option { item.select(option, in: group) }
+        else { item.selectMediaOptionAutomatically(in: group) }
+    }
+
+    private func selectDefaultNativeSubtitle(in group: AVMediaSelectionGroup, item: AVPlayerItem) {
+        if preferences.options.subtitlesEnabled {
+            selectPreferredNativeOption(in: group, item: item, language: preferences.options.subtitleLanguage)
+        } else {
+            item.select(nil, in: group)
+        }
+    }
+
+    func selectNativeAudio(_ id: Int) {
+        guard let audioGroup, let item = player.currentItem, let media else { return }
+        if id == -1 {
+            selectPreferredNativeOption(in: audioGroup, item: item, language: preferences.options.audioLanguage)
+            library.updatePlaybackMemory(for: media.id) { $0.nativeAudio = nil }
+            nativeAudioID = id
+        } else if audioGroup.options.indices.contains(id) {
+            let option = audioGroup.options[id]
+            item.select(option, in: audioGroup)
+            nativeAudioID = id
+            if let data = Self.encodeNativeOption(option) {
+                library.updatePlaybackMemory(for: media.id) { $0.nativeAudio = data }
+            }
+        }
+    }
+
     func selectNativeSubtitle(_ id: Int) {
-        guard let subtitleGroup, let item = player.currentItem else { return }
-        item.select(subtitleGroup.options.indices.contains(id) ? subtitleGroup.options[id] : nil, in: subtitleGroup)
+        guard let subtitleGroup, let item = player.currentItem, let media else { return }
+        if id == Self.automaticNativeSubtitle {
+            selectDefaultNativeSubtitle(in: subtitleGroup, item: item)
+            library.updatePlaybackMemory(for: media.id) { $0.nativeSubtitles = nil }
+        } else if id == -1 {
+            item.select(nil, in: subtitleGroup)
+            library.updatePlaybackMemory(for: media.id) { $0.nativeSubtitles = .off }
+        } else if subtitleGroup.options.indices.contains(id) {
+            let option = subtitleGroup.options[id]
+            item.select(option, in: subtitleGroup)
+            if let data = Self.encodeNativeOption(option) {
+                library.updatePlaybackMemory(for: media.id) { $0.nativeSubtitles = .track(data) }
+            }
+        } else {
+            return
+        }
         nativeSubtitleID = id
     }
     func saveProgress() {
@@ -389,7 +468,7 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         preparation?.cancel(); preparation = nil
         preparingAirPlay = false; airPlayMessage = nil; usingNativeAirPlay = false
         compatibilityTask?.cancel(); compatibilityTask = nil; exportingCompatibility = false; compatibilityMessage = ""
-        technicalInfo = nil; resolvedPlaybackURL = nil
+        technicalInfo = nil; resolvedPlaybackURL = nil; resolvedSubtitles = []
         skipTask?.cancel(); skipTask = nil; skipAttempted = nil; detectedSkip = SkipDetection(); nativeChapters = []; skipAnalysis = ""
         saveProgress(); timer?.invalidate(); timer = nil
         mpv?.stop(); mpv = nil

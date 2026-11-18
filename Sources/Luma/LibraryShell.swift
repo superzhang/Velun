@@ -3,9 +3,9 @@ import AppKit
 import AVFoundation
 
 enum Destination: Hashable {
-    case home, recent, all, movies, shows, unwatched, favorites, top, genres, unmatched, files, source(UUID), playlist(String), collection(String)
+    case home, recent, all, movies, shows, unwatched, favorites, top, genres, unmatched, files, missing, source(UUID), playlist(String), collection(String)
     var title: String {
-        switch self { case .home: "主屏幕"; case .recent: "最近添加"; case .all: "全部视频"; case .movies: "电影"; case .shows: "电视剧"; case .unwatched: "未观看的"; case .favorites: "我的收藏"; case .top: "最受好评的电影"; case .genres: "电影类型"; case .unmatched: "待匹配"; case .files: "文件"; case .source: "文件来源"; case .playlist(let name): name; case .collection(let name): name }
+        switch self { case .home: "主屏幕"; case .recent: "最近添加"; case .all: "全部视频"; case .movies: "电影"; case .shows: "电视剧"; case .unwatched: "未观看的"; case .favorites: "我的收藏"; case .top: "最受好评的电影"; case .genres: "电影类型"; case .unmatched: "待匹配"; case .files: "文件"; case .missing: "缺失文件"; case .source: "文件来源"; case .playlist(let name): name; case .collection(let name): name }
     }
 }
 
@@ -31,6 +31,8 @@ struct RootView: View {
     @State private var folder = ""
     @State private var address = ""
     @State private var addressError: String?
+    @State private var finderError: String?
+    @State private var locatingInFinder = false
     @AppStorage("library.listMode") private var listMode = false
     @AppStorage("library.sort") private var sort = "recent"
     @State private var localOnly = false
@@ -57,8 +59,11 @@ struct RootView: View {
                         toolbar
                         Divider().opacity(0.25)
                         if let detail {
-                            DetailView(group: detail, library: library, metadata: metadata, playback: playback, sourceName: sources.sources.first { $0.id == detail.representative.sourceID }?.name, play: { playback.open($0) }, match: { matching = $0 }, selectionChanged: { selectedDetailID = $0.id })
+                            DetailView(group: detail, library: library, metadata: metadata, playback: playback, sourceName: sources.sources.first { $0.id == detail.representative.sourceID }?.name, play: { playback.open($0) }, match: { matching = $0 }, selectionChanged: { selectedDetailID = $0.id }, finderAction: finderAction)
                         } else if destination == .files { filesPage }
+                        else if destination == .missing {
+                            MissingFilesView(library: library, sources: sources, metadata: metadata, search: search)
+                        }
                         else if selectedSource != nil { sourceBrowser }
                         else if destination == .genres && selectedGenre == nil && search.isEmpty { genrePage }
                         else if destination == .home && search.isEmpty { homePage }
@@ -73,6 +78,13 @@ struct RootView: View {
         .sheet(isPresented: $showTMDB) { TMDBSettingsView(store: metadata, library: library).tint(.orange) }
         .sheet(isPresented: $showURL) { urlSheet }
         .sheet(item: $matching) { item in MatchView(media: item, library: library, store: metadata).tint(.orange) }
+        .alert("无法在 Finder 中显示", isPresented: Binding(
+            get: { finderError != nil }, set: { if !$0 { finderError = nil } }
+        )) {
+            Button("好", role: .cancel) { finderError = nil }
+        } message: {
+            Text(finderError ?? "")
+        }
         .task { if metadata.autoMatch { metadata.matchMissing(library) } }
         .onChange(of: library.structureRevision) { _, _ in if metadata.autoMatch { metadata.matchMissing(library) } }
         .onChange(of: search) { _, value in if !value.isEmpty { detailID = nil } }
@@ -107,6 +119,7 @@ struct RootView: View {
                     }
                     sidebarHeader("文件", icon: "folder", destination: .files, expanded: $filesExpanded)
                     if filesExpanded {
+                        nav("缺失文件", icon: "exclamationmark.triangle", target: .missing, indented: true)
                         ForEach(sources.sources) { source in nav(source.name, icon: "folder", target: .source(source.id), indented: true) }
                         Button { showSources = true } label: {
                             Label("添加文件来源…", systemImage: "plus.circle").foregroundStyle(.secondary)
@@ -167,7 +180,20 @@ struct RootView: View {
             else if selectedSource != nil { Text(folder.isEmpty ? (selectedSource?.name ?? "文件") : String(folder.split(separator: "/").last ?? "")).font(.headline).lineLimit(1) }
             else { Text(search.isEmpty ? (selectedGenre ?? destination.title) : "搜索结果").font(.headline) }
             Spacer()
-            if detailID == nil && destination != .files && selectedSource == nil {
+            if detailID == nil && destination == .home && search.isEmpty && !sources.networkFileShares.isEmpty {
+                let warningCount = sources.networkIssueCount
+                if warningCount > 0 {
+                    Button { navigate(.files) } label: {
+                        Label("\(warningCount) 个共享需检查", systemImage: "exclamationmark.triangle")
+                    }.help("查看来源状态")
+                }
+                Button {
+                    sources.refreshNetwork(library: library, metadata: metadata)
+                } label: {
+                    Label("刷新 NAS", systemImage: "arrow.clockwise")
+                }.disabled(sources.busy).help("扫描已连接的 NAS 共享")
+            }
+            if detailID == nil && destination != .files && destination != .missing && selectedSource == nil {
                 Picker("显示范围", selection: $localOnly) { Text("全部").tag(false); Text("本地文件").tag(true) }.pickerStyle(.segmented).labelsHidden().frame(width: 160)
                 Button { listMode.toggle() } label: { Image(systemName: listMode ? "square.grid.2x2" : "list.bullet").font(.system(size: 16)) }.buttonStyle(.plain).help(listMode ? "海报模式" : "列表模式").accessibilityLabel(listMode ? "海报模式" : "列表模式")
             }
@@ -175,7 +201,7 @@ struct RootView: View {
                 DetailActions(group: detail, selected: detail.items.first { $0.id == selectedDetailID } ?? detail.resume, library: library, playback: playback, match: { matching = $0 })
             } else {
             Menu {
-                if detailID == nil {
+                if detailID == nil && destination != .missing {
                     ControlGroup {
                         Button("缩小海报") { posterWidth = max(120, posterWidth - 15) }
                         Button("放大海报") { posterWidth = min(220, posterWidth + 15) }
@@ -215,7 +241,7 @@ struct RootView: View {
                         ForEach(groups) { group in
                             Button { detailID = group.representative.id } label: {
                                 HStack(spacing: 18) {
-                                    PosterArtwork(media: group.representative, url: group.info?.poster).frame(width: 50, height: 75).clipShape(RoundedRectangle(cornerRadius: 6))
+                                    PosterArtwork(media: group.representative, url: group.poster, fallbackURL: group.info?.poster).frame(width: 50, height: 75).clipShape(RoundedRectangle(cornerRadius: 6))
                                     VStack(alignment: .leading, spacing: 5) { Text(group.title).font(.headline); Text(group.subtitle).font(.caption).foregroundStyle(.secondary) }
                                     Spacer()
                                     if group.isWatched { Image(systemName: "checkmark.circle").foregroundStyle(.orange) }
@@ -246,10 +272,10 @@ struct RootView: View {
         let top = movies.filter { ($0.info?.rating ?? 0) > 0 }.sorted { ($0.info?.rating ?? 0) > ($1.info?.rating ?? 0) }
         let continuing = values.filter { $0.items.contains { $0.isContinuing || $0.watchlisted == true } }.sorted { $0.lastPlayed > $1.lastPlayed }
         var genreCounts: [String: Int] = [:]
-        for movie in movies { for genre in Set(movie.info?.genres ?? []) { genreCounts[genre, default: 0] += 1 } }
+        for movie in movies { for genre in Set(movie.genres) { genreCounts[genre, default: 0] += 1 } }
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 30) {
-                if let featured = values.first(where: { group in featuredMediaID.map { id in group.items.contains(where: { $0.id == id }) } ?? false }) ?? values.first(where: { $0.info?.backdrop != nil }) ?? values.first {
+                if let featured = values.first(where: { group in featuredMediaID.map { id in group.items.contains(where: { $0.id == id }) } ?? false }) ?? values.first(where: { $0.localBackdrop != nil || $0.info?.backdrop != nil }) ?? values.first {
                     FeatureBanner(group: featured, play: { playback.open(featured.resume) }, details: { detailID = featured.representative.id }).onAppear { if featuredMediaID == nil { featuredMediaID = featured.representative.id } }
                 }
                 VStack(alignment: .leading, spacing: 14) {
@@ -329,13 +355,34 @@ struct RootView: View {
         Button(group.isWatched ? "标记为未观看" : "标记为已观看") { library.setWatched(group.items.map(\.id), to: !group.isWatched) }
         Button(group.hasFavorite ? "取消收藏" : "加入收藏") { library.setFavorite(group.items.map(\.id), to: !group.hasFavorite) }
         Button("编辑影片信息 / 海报…") { matching = group.representative }
-        if group.representative.url.isFileURL { Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([group.representative.url]) } }
+        if let reveal = finderAction(group.representative) { Button("在 Finder 中显示", action: reveal) }
         Divider()
         Button("从媒体库移除", role: .destructive) { for item in group.items { library.remove(item.id) } }
     }
+    private func finderAction(_ media: Media) -> (() -> Void)? {
+        let source = sources.sources.first { $0.id == media.sourceID }
+        guard FinderLocation.isAvailable(for: media, source: source) else { return nil }
+        return {
+            guard !locatingInFinder else { return }
+            locatingInFinder = true
+            Task {
+                defer { locatingInFinder = false }
+                do {
+                    let file = try await FinderLocation.resolve(media, source: source)
+                    let parent = file.deletingLastPathComponent()
+                    let workspace = NSWorkspace.shared
+                    guard workspace.selectFile(file.path, inFileViewerRootedAtPath: parent.path) || workspace.open(parent) else {
+                        throw SourceWorker.failure("Finder 无法打开文件所在文件夹。")
+                    }
+                } catch {
+                    finderError = error.localizedDescription
+                }
+            }
+        }
+    }
     private var genrePage: some View {
         let scope = groups
-        let genres = Array(Set(scope.filter { !$0.isTV }.flatMap { $0.info?.genres ?? [] })).sorted()
+        let genres = Array(Set(scope.filter { !$0.isTV }.flatMap { $0.genres })).sorted()
         return ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("电影类型").font(.system(size: 26, weight: .semibold))
@@ -345,7 +392,7 @@ struct RootView: View {
                         Button { selectedGenre = genre } label: {
                             VStack(alignment: .leading, spacing: 20) {
                                 Image(systemName: "film.stack").font(.system(size: 28, weight: .light)).foregroundStyle(.orange)
-                                HStack { Text(genre).font(.title3.weight(.semibold)); Spacer(); Text("\(scope.filter { !$0.isTV && $0.info?.genres?.contains(genre) == true }.count)").foregroundStyle(.secondary) }
+                                HStack { Text(genre).font(.title3.weight(.semibold)); Spacer(); Text("\(scope.filter { !$0.isTV && $0.genres.contains(genre) }.count)").foregroundStyle(.secondary) }
                             }.padding(24).background(LinearGradient(colors: [LumaTheme.ink.opacity(0.08), LumaTheme.ink.opacity(0.03)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 12))
                         }.buttonStyle(.plain)
                     }
@@ -356,14 +403,26 @@ struct RootView: View {
     private var filesPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("文件来源").font(.system(size: 26, weight: .semibold))
+                HStack {
+                    Text("文件来源").font(.system(size: 26, weight: .semibold))
+                    Spacer()
+                    Button { navigate(.missing) } label: {
+                        Label("缺失文件（\(library.items.lazy.filter { $0.sourceMissing == true }.count)）", systemImage: "exclamationmark.triangle")
+                    }.controlSize(.large)
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 20)], spacing: 20) {
                     ForEach(sources.sources) { source in
                         Button { navigate(.source(source.id)) } label: {
                             VStack(alignment: .leading, spacing: 16) {
                                 Image(systemName: "externaldrive.connected.to.line.below").font(.system(size: 40, weight: .light)).foregroundStyle(.orange)
                                 Text(source.name).font(.title3.weight(.semibold))
-                                Text(source.protocolTitle).font(.caption).foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    Text(source.protocolTitle).foregroundStyle(.secondary)
+                                    if let issue = sources.scanIssues[source.id] {
+                                        Label(issue.title, systemImage: "exclamationmark.triangle")
+                                            .foregroundStyle(.orange).help(issue.detail)
+                                    }
+                                }.font(.caption)
                             }.frame(maxWidth: .infinity, minHeight: 145, alignment: .leading).padding(24).background(LumaTheme.ink.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
                         }.buttonStyle(.plain)
                     }
@@ -392,16 +451,25 @@ struct RootView: View {
                     Spacer()
                     Button("连接并重新扫描") { if let source = selectedSource { sources.scan(source, library: library, metadata: metadata) } }.disabled(sources.busy)
                 }.padding(.bottom, 16)
+                if let source = selectedSource, let issue = sources.scanIssues[source.id] {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(issue.title, systemImage: "exclamationmark.triangle").font(.callout.weight(.semibold))
+                        Text(issue.detail).font(.callout).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
                 ForEach(folders, id: \.self) { name in
                     Button { folder = prefix + name } label: { HStack { Image(systemName: "folder.fill").font(.title2).foregroundStyle(.orange); Text(name); Spacer(); Image(systemName: "chevron.right").foregroundStyle(.secondary) }.padding(14).contentShape(Rectangle()) }.buttonStyle(.plain)
                     Divider().opacity(0.25)
                 }
                 ForEach(direct) { item in
-                    Button { detailID = item.id } label: { HStack { Image(systemName: "film").font(.title2).foregroundStyle(.secondary); Text(item.url.lastPathComponent).lineLimit(1); Spacer(); if item.isWatched { Image(systemName: "checkmark").foregroundStyle(.orange) }; Text(item.format).font(.caption).foregroundStyle(.secondary) }.padding(14).contentShape(Rectangle()) }.buttonStyle(.plain)
+                    Button { detailID = item.id } label: { HStack { Image(systemName: "film").font(.title2).foregroundStyle(.secondary); Text(item.url.lastPathComponent).lineLimit(1); Spacer(); if item.sourceMissing == true { Text("文件缺失").foregroundStyle(.orange) } else if item.isWatched { Image(systemName: "checkmark").foregroundStyle(.orange) }; Text(item.format).font(.caption).foregroundStyle(.secondary) }.padding(14).contentShape(Rectangle()) }.buttonStyle(.plain)
                     Divider().opacity(0.25)
                 }
                 if folders.isEmpty && direct.isEmpty { Text("还没有扫描到视频，请先连接并扫描这个来源。") .foregroundStyle(.secondary).padding(.vertical, 36) }
-                if let error = sources.error { Text(error).foregroundStyle(.orange) }
+                if let error = sources.error, sources.scanIssues.isEmpty {
+                    Text(error).foregroundStyle(.orange)
+                }
                 if !sources.status.isEmpty { Text(sources.status).font(.caption).foregroundStyle(.secondary).padding(.top, 16) }
             }.padding(28)
         }
@@ -449,7 +517,7 @@ struct LibraryPoster: View {
     var body: some View {
         Button(action: open) {
             VStack(alignment: .leading, spacing: 8) {
-                PosterArtwork(media: group.representative, url: group.info?.poster)
+                PosterArtwork(media: group.representative, url: group.poster, fallbackURL: group.info?.poster)
                     .aspectRatio(2 / 3, contentMode: .fit)
                     .overlay(alignment: .topTrailing) {
                         if !group.isWatched { UnwatchedCorner().fill(.orange).frame(width: 28, height: 28).accessibilityLabel("未观看") }
@@ -472,11 +540,12 @@ struct UnwatchedCorner: Shape {
 struct PosterArtwork: View {
     let media: Media
     let url: URL?
+    var fallbackURL: URL? = nil
     @State private var frame: NSImage?
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color(white: 0.24), Color(white: 0.13)], startPoint: .topLeading, endPoint: .bottomTrailing)
-            if let url { PosterView(url: url) }
+            if let url { PosterView(url: url, fallbackURL: url == fallbackURL ? nil : fallbackURL) }
             else if let frame {
                 GeometryReader { geometry in Image(nsImage: frame).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped() }
             } else {

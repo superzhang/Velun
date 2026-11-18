@@ -4,6 +4,14 @@
 
 **A personal media player for Mac.** Velun takes inspiration from Infuse's poster wall, episode pages, and playback controls. If you enjoy browsing and resuming shows in Infuse and want an open-source macOS app for your local or NAS library, give Velun a try. Velun is independent of Infuse and Firecore.
 
+## Screenshots
+
+![Velun poster wall with official Blender open movie posters](docs/screenshots/library.jpg)
+
+![Velun movie details with a Tears of Steel still and resume controls](docs/screenshots/details.jpg)
+
+[Artwork sources and licenses](docs/screenshots/CREDITS.md)
+
 ## Features
 
 - **Local and NAS libraries** · Add local folders, SMB, WebDAV, or Alist. You can also connect to Jellyfin, Emby, and Plex.

@@ -4,6 +4,14 @@
 
 **为 Mac 打造的私人影音播放器。** Velun 的海报墙、剧集详情和播放操作受到 Infuse 启发。如果你喜欢 Infuse 的浏览和续播体验，想用一款开源的 macOS 应用管理本地或 NAS 片库，可以试试 Velun。这是独立项目，与 Infuse 和 Firecore 无关联。
 
+## 界面截图
+
+![Velun 海报墙，展示 Blender 开放电影的真实海报](docs/screenshots/library.jpg)
+
+![Velun 影片详情，展示 Tears of Steel 的剧照和续播按钮](docs/screenshots/details.jpg)
+
+[封面与剧照来源及许可](docs/screenshots/CREDITS.md)
+
 ## 功能
 
 - **本地与 NAS 片库** · 添加本地文件夹、SMB、WebDAV 或 Alist，也支持连接 Jellyfin、Emby 和 Plex。

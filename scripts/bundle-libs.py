@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Copy recursive Homebrew dylibs into the app and remove absolute dependencies."""
 from pathlib import Path
-import subprocess, shutil, sys, json
+import subprocess, shutil, sys, json, plistlib
 app = Path(sys.argv[1]).resolve()
 frameworks = app / 'Contents/Frameworks'
 frameworks.mkdir(parents=True, exist_ok=True)
-main = app / 'Contents/MacOS/Luma'
+with (app / 'Contents/Info.plist').open('rb') as info:
+    main = app / 'Contents/MacOS' / plistlib.load(info)['CFBundleExecutable']
 seen = {}
 inventory = []
 def run(*args): return subprocess.check_output(args, text=True)

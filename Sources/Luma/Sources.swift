@@ -10,6 +10,12 @@ struct LibrarySource: Codable, Identifiable, Sendable {
     var connectionKind: SourceKind?
     var directSMB: Bool?
     var connectionRevision: UUID?
+    var excludedFromLibrary: Bool?
+    var smbBrowseOnly: Bool?
+    var smbFolderFavorite: Bool?
+    var smbCredentialOwnerID: UUID?
+    var credentialID: UUID { smbCredentialOwnerID ?? id }
+    var isMediaSource: Bool { smbBrowseOnly != true && smbFolderFavorite != false }
     var kind: SourceKind { connectionKind ?? (isSMB ? .smb : .nfs) }
     var protocolTitle: String { url.isFileURL ? "文件夹" : kind.title }
     var isRemote: Bool { directSMB == true || (connectionKind.map { !$0.mounted } ?? false) }
@@ -122,46 +128,138 @@ enum SourceScanIssue: Equatable {
 }
 
 @MainActor @Observable final class SourcesStore {
-    private(set) var sources: [LibrarySource] = []
+    private var records: [LibrarySource] = []
+    var sources: [LibrarySource] { records.filter(\.isMediaSource) }
+    var starredSMBFolders: [LibrarySource] { sources.filter { $0.directSMB == true } }
+    var smbBrowserSources: [LibrarySource] {
+        var byServer: [URL: LibrarySource] = [:]
+        for record in records where record.directSMB == true {
+            let server = SMBClient.serverURL(record.url)
+            if byServer[server] == nil || record.smbBrowseOnly == true { byServer[server] = record }
+        }
+        return byServer.values.sorted { smbBrowserName($0).localizedStandardCompare(smbBrowserName($1)) == .orderedAscending }
+    }
     private(set) var scanIssues: [UUID: SourceScanIssue] = [:]
+    var excludedSourceIDs: Set<UUID> {
+        Set(records.lazy.filter { !$0.isMediaSource || $0.excludedFromLibrary == true }.map(\.id))
+    }
+    var librarySources: [LibrarySource] { sources.filter { $0.excludedFromLibrary != true } }
     var networkFileShares: [LibrarySource] { sources.filter { !$0.url.isFileURL && $0.isFileShare } }
     var networkIssueCount: Int { networkFileShares.filter { scanIssues[$0.id] != nil }.count }
     var busy = false
     var status = ""
     var error: String?
     private var task: Task<Void, Never>?
+    private var pendingFavoriteScans: Set<UUID> = []
     private let file: URL
     private var loadFailed = false
     init(file: URL? = nil) {
         self.file = file ?? URL.applicationSupportDirectory.appending(path: "Luma/sources.json")
         if FileManager.default.fileExists(atPath: self.file.path) {
-            do { sources = try JSONDecoder().decode([LibrarySource].self, from: Data(contentsOf: self.file)) }
+            do { records = try JSONDecoder().decode([LibrarySource].self, from: Data(contentsOf: self.file)) }
             catch { self.error = "来源列表读取失败，原文件已保留。"; loadFailed = true }
         }
     }
     func add(name: String, url: URL, kind: SourceKind? = nil, directSMB: Bool? = nil, id: UUID = UUID()) -> LibrarySource {
         if let source = sources.first(where: { $0.url == url && $0.connectionKind == kind && $0.directSMB == directSMB }) { return source }
         let source = LibrarySource(id: id, name: name.isEmpty ? (url.host ?? url.lastPathComponent) : name, url: url, connectionKind: kind, directSMB: directSMB)
-        sources.append(source); save(); return source
+        records.append(source); save(); return source
     }
+    func smbBrowserName(_ source: LibrarySource) -> String {
+        if source.smbBrowseOnly == true { return source.name }
+        let host = source.url.host ?? source.name
+        if let port = SMBClient.serverURL(source.url).port { return "\(host):\(port)" }
+        return host
+    }
+
+    func smbBrowserSource(at url: URL) -> LibrarySource? {
+        records.first { $0.smbBrowseOnly == true && SMBClient.serverURL($0.url) == SMBClient.serverURL(url) }
+    }
+
+    func addSMBBrowser(name: String, url: URL, id: UUID) -> LibrarySource {
+        let server = SMBClient.serverURL(url)
+        let source = LibrarySource(id: id, name: name.isEmpty ? server.host ?? server.absoluteString : name,
+                                   url: server, connectionKind: .smb, directSMB: true, smbBrowseOnly: true)
+        records.append(source)
+        save()
+        return source
+    }
+
+    func smbFolder(at url: URL) -> LibrarySource? {
+        records.first { $0.directSMB == true && $0.smbBrowseOnly != true && SMBClient.sameFolder($0.url, url) }
+    }
+
+    func hasLinkedSMBFolders(_ source: LibrarySource) -> Bool {
+        records.contains { $0.smbCredentialOwnerID == source.id }
+    }
+
+    func addSMBFavorite(at url: URL, id: UUID, credentialOwnerID: UUID?, library: Library, metadata: MetadataStore) {
+        let source = LibrarySource(id: id, name: url.lastPathComponent, url: url, connectionKind: .smb,
+                                   directSMB: true, smbCredentialOwnerID: credentialOwnerID)
+        records.append(source)
+        save()
+        scanFavorite(source, library: library, metadata: metadata)
+    }
+
+    func setSMBFolderFavorite(_ favorite: Bool, for id: UUID, library: Library, metadata: MetadataStore) {
+        guard let index = records.firstIndex(where: { $0.id == id && $0.directSMB == true && $0.smbBrowseOnly != true }),
+              records[index].isMediaSource != favorite else { return }
+        records[index].smbFolderFavorite = favorite ? nil : false
+        save()
+        if favorite {
+            scanFavorite(records[index], library: library, metadata: metadata)
+        } else {
+            pendingFavoriteScans.remove(id)
+            scanIssues[id] = nil
+        }
+    }
+
+    private func scanFavorite(_ source: LibrarySource, library: Library, metadata: MetadataStore) {
+        if busy { pendingFavoriteScans.insert(source.id) }
+        else { scan(source, library: library, metadata: metadata) }
+    }
+
     func update(_ source: LibrarySource, name: String, url: URL, kind: SourceKind, directSMB: Bool? = nil) -> LibrarySource {
-        var value = source; value.name = name.isEmpty ? (url.host ?? source.name) : name; value.url = url; value.connectionKind = kind; value.lastScan = nil; value.directSMB = directSMB; value.connectionRevision = UUID()
-        if let index = sources.firstIndex(where: { $0.id == source.id }) {
-            sources[index] = value
+        let index = records.firstIndex(where: { $0.id == source.id })
+        var value = index.map { records[$0] } ?? source
+        value.name = name.isEmpty ? (url.host ?? source.name) : name; value.url = url; value.connectionKind = kind; value.lastScan = nil; value.directSMB = directSMB; value.connectionRevision = UUID()
+        value.smbCredentialOwnerID = nil
+        if let index {
+            records[index] = value
+            if value.smbBrowseOnly == true {
+                for linked in records.indices where records[linked].smbCredentialOwnerID == source.id {
+                    records[linked].connectionRevision = value.connectionRevision
+                }
+            }
             scanIssues[source.id] = nil
             save()
         }
         return value
     }
     func remove(_ source: LibrarySource) {
-        SourceSecrets.remove(source.id)
+        let credentialID = records.first { $0.id == source.id }?.credentialID ?? source.id
         Task { await RemoteSources.shared.stop(source.id) }
-        sources.removeAll { $0.id == source.id }
+        records.removeAll { $0.id == source.id }
+        if !records.contains(where: { $0.credentialID == credentialID }) { SourceSecrets.remove(credentialID) }
+        pendingFavoriteScans.remove(source.id)
         scanIssues[source.id] = nil
         save()
     }
     func scan(_ source: LibrarySource, library: Library, metadata: MetadataStore) {
         beginScan([source], library: library, metadata: metadata, automatic: false)
+    }
+
+    func setLibraryInclusion(_ included: Bool, for id: UUID) {
+        guard let index = records.firstIndex(where: { $0.id == id && $0.isMediaSource }),
+              (records[index].excludedFromLibrary != true) != included else { return }
+        records[index].excludedFromLibrary = included ? nil : true
+        save()
+    }
+
+    func refreshLibrary(library: Library, metadata: MetadataStore) {
+        let included = librarySources
+        guard !included.isEmpty else { return }
+        beginScan(included, library: library, metadata: metadata, automatic: false)
     }
 
     @discardableResult
@@ -177,7 +275,12 @@ enum SourceScanIssue: Equatable {
         busy = true; error = nil
         status = "正在扫描目录…"
         task = Task {
-            defer { busy = false; task = nil }
+            defer {
+                busy = false; task = nil
+                let queued = records.filter { $0.isMediaSource && pendingFavoriteScans.contains($0.id) }
+                pendingFavoriteScans.removeAll()
+                if !queued.isEmpty { beginScan(queued, library: library, metadata: metadata, automatic: false) }
+            }
             let mounts = automatic && candidates.contains(where: { !$0.isRemote }) ? await MountedShareScanner.scan() : []
             var completed = 0
             var imported = 0
@@ -194,7 +297,7 @@ enum SourceScanIssue: Equatable {
                             if source.kind == .dlna {
                                 result = try await DLNAClient.scan(source)
                             } else {
-                                let credentials = try await SourceSecrets.read(source.id)
+                                let credentials = try await SourceSecrets.read(source.credentialID)
                                 if source.kind.mediaServer {
                                     let connected = try await MediaServerClient.scan(source, credentials: credentials)
                                     if connected.credentials.token != credentials.token || connected.credentials.userID != credentials.userID {
@@ -226,12 +329,12 @@ enum SourceScanIssue: Equatable {
                         guard let i = currentIndex(for: source) else { continue }
                         if let updatedCredentials {
                             try SourceSecrets.save(updatedCredentials, id: source.id)
-                            sources[i].connectionRevision = UUID()
+                            records[i].connectionRevision = UUID()
                         }
                         library.importSource(source.id, files: result.files, complete: source.isFileShare && result.unreadable == 0)
                         if result.unreadable == 0 {
                             scanIssues[source.id] = nil
-                            sources[i].lastScan = Date()
+                            records[i].lastScan = Date()
                             save()
                         } else {
                             scanIssues[source.id] = .incomplete(result.unreadable)
@@ -262,15 +365,15 @@ enum SourceScanIssue: Equatable {
     }
 
     private func currentIndex(for source: LibrarySource) -> Int? {
-        sources.firstIndex { $0.id == source.id && $0.url == source.url && $0.connectionRevision == source.connectionRevision }
+        records.firstIndex { $0.id == source.id && $0.isMediaSource && $0.url == source.url && $0.connectionRevision == source.connectionRevision }
     }
 
-    func cancel() { task?.cancel(); status = "正在停止…系统登录窗口可点取消。" }
+    func cancel() { pendingFavoriteScans.removeAll(); task?.cancel(); status = "正在停止…系统登录窗口可点取消。" }
     private func save() {
         guard !loadFailed else { return }
         do {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(sources).write(to: file, options: .atomic)
+            try JSONEncoder().encode(records).write(to: file, options: .atomic)
         } catch { self.error = "来源保存失败：\(error.localizedDescription)" }
     }
 }

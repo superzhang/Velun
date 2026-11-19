@@ -134,16 +134,17 @@ struct DetailActions: View {
 }
 
 enum VideoCopy {
-    @concurrent static func save(_ source: URL, to destination: URL) async throws {
+    @concurrent static func save(_ source: URL, to destination: URL, delegate: (any URLSessionTaskDelegate)? = nil) async throws {
         let staging = destination.deletingLastPathComponent().appending(path: ".luma-\(UUID())")
         defer { try? FileManager.default.removeItem(at: staging) }
         if source.isFileURL { try FileManager.default.copyItem(at: source, to: staging) }
         else {
-            let (temporary, response) = try await URLSession.shared.download(from: source)
+            let (temporary, response) = try await URLSession.shared.download(from: source, delegate: delegate)
             defer { try? FileManager.default.removeItem(at: temporary) }
             guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { throw URLError(.badServerResponse) }
             try FileManager.default.moveItem(at: temporary, to: staging)
         }
+        try Task.checkCancellation()
         if FileManager.default.fileExists(atPath: destination.path) { _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging) }
         else { try FileManager.default.moveItem(at: staging, to: destination) }
     }

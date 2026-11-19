@@ -2,6 +2,17 @@ import Foundation
 import Testing
 @testable import Luma
 
+@Test func browsingLocalFilesShowsEmptyFoldersAndVideos() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root.appending(component: "空文件夹"), withIntermediateDirectories: true)
+    try Data().write(to: root.appending(component: "电影.mp4"))
+    try Data().write(to: root.appending(component: "说明.txt"))
+    let entries = try await SavedSourceFileBrowser.localEntries(root)
+    #expect(entries.map(\.name) == ["空文件夹", "电影.mp4"])
+    #expect(entries.map(\.isDirectory) == [true, false])
+}
+
 @Test @MainActor func detailListsRatingAndWatchlistPersist() throws {
     let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }

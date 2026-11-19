@@ -44,16 +44,34 @@ import Testing
 }
 
 @Test(.enabled(if: ProcessInfo.processInfo.environment["LUMA_SMB_FIXTURE"] != nil))
-func smbAuthenticatesBrowsesScansAndSeeks() async throws {
+@MainActor func smbAuthenticatesBrowsesScansAndSeeks() async throws {
     let root = URL(string: "smb://127.0.0.1:14455")!
     let credentials = SourceCredentials(username: "luma-test", password: "fixture-only")
     let shares = try await SMBClient.browse(root, credentials: credentials)
     let share = try #require(shares.first { $0.name.lowercased() == "movies" })
     let directories = try await SMBClient.browse(share.url, credentials: credentials)
-    #expect(directories.contains { $0.name == "剧集" })
+    let folder = try #require(directories.first { $0.name == "剧集" && $0.isDirectory })
+    let directFiles = try await SMBClient.browse(folder.url, credentials: credentials)
+    let directFile = try #require(directFiles.first { $0.name == "Fixture.S01E01.mp4" && !$0.isDirectory })
     let source = LibrarySource(name: "Fixture", url: share.url, connectionKind: .smb, directSMB: true)
     let remote = RemoteSources(credentialsProvider: { _ in credentials })
     do {
+        let browser = LibrarySource(name: "Fixture NAS", url: root, connectionKind: .smb, directSMB: true, smbBrowseOnly: true)
+        let directPlayback = try await remote.browsedSMBURL(directFile.url, connection: browser)
+        let downloadsFolder = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: downloadsFolder) }
+        let downloads = OfflineDownloads(directory: downloadsFolder)
+        downloads.start(name: directFile.name, key: directFile.url) { directPlayback }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while let item = downloads.items.first, case .transferring = item.state, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let downloaded = try #require(OfflineDownloads(directory: downloadsFolder).items.first)
+        let copy = try #require({
+            if case .ready(let copy) = downloaded.state { return copy }
+            return nil
+        }())
+        #expect(try Data(contentsOf: copy) == Data(contentsOf: URL(filePath: ProcessInfo.processInfo.environment["LUMA_SMB_FIXTURE"]!)))
         let scan = try await remote.scan(source, credentials: credentials)
         let file = try #require(scan.files.first)
         #expect(scan.files.count == 1)
@@ -65,10 +83,47 @@ func smbAuthenticatesBrowsesScansAndSeeks() async throws {
         let original = try Data(contentsOf: URL(filePath: ProcessInfo.processInfo.environment["LUMA_SMB_FIXTURE"]!))
         #expect(data == original[128..<1152])
         await remote.stopAll()
-    await #expect(throws: (any Error).self) {
-        _ = try await SMBClient.browse(root, credentials: SourceCredentials(username: "luma-test", password: "wrong"))
-    }
+        await #expect(throws: (any Error).self) {
+            _ = try await SMBClient.browse(root, credentials: SourceCredentials(username: "luma-test", password: "wrong"))
+        }
     } catch { await remote.stopAll(); throw error }
+}
+
+@Test @MainActor func savedSMBBrowserAndFavoritesPersistIndependently() throws {
+    let directory = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let sourceFile = directory.appending(component: "sources.json")
+    let store = SourcesStore(file: sourceFile)
+    let url = try #require(SMBClient.endpoint("smb://NAS.test:445/影视 100%"))
+    let browser = store.addSMBBrowser(name: "Fixture NAS", url: url, id: UUID())
+    #expect(browser.url == SMBClient.endpoint("smb://nas.test"))
+    #expect(store.sources.isEmpty)
+
+    let library = Library(file: directory.appending(component: "library.json"))
+    let metadata = MetadataStore()
+    let favoriteID = UUID()
+    store.busy = true
+    store.addSMBFavorite(at: url, id: favoriteID, credentialOwnerID: browser.id, library: library, metadata: metadata)
+    #expect(store.smbBrowserSources.map(\.id) == [browser.id])
+    #expect(store.sources.map(\.id) == [favoriteID])
+    #expect(store.smbFolder(at: url.appending(path: "", directoryHint: .isDirectory))?.id == favoriteID)
+    let updated = store.update(browser, name: "Renamed NAS", url: browser.url, kind: .smb, directSMB: true)
+    #expect(store.sources.first?.connectionRevision == updated.connectionRevision)
+    #expect(store.sources.first?.credentialID == browser.id)
+
+    store.setSMBFolderFavorite(false, for: favoriteID, library: library, metadata: metadata)
+    let restored = SourcesStore(file: sourceFile)
+    #expect(restored.smbBrowserSources.map(\.name) == ["Renamed NAS"])
+    #expect(restored.sources.isEmpty)
+    #expect(restored.excludedSourceIDs.contains(favoriteID))
+    #expect(restored.smbFolder(at: url)?.credentialID == browser.id)
+
+    restored.busy = true
+    restored.setSMBFolderFavorite(true, for: favoriteID, library: library, metadata: metadata)
+    #expect(SourcesStore(file: sourceFile).sources.map(\.id) == [favoriteID])
+    _ = restored.add(name: "Local files", url: directory)
+    #expect(restored.sources.count == 2)
+    #expect(restored.starredSMBFolders.map(\.id) == [favoriteID])
 }
 
 @Test @MainActor func automaticRefreshRecordsUnmountedSourceWithoutMarkingItsFilesMissing() async throws {

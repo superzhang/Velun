@@ -143,6 +143,16 @@ actor RemoteSources {
         for component in path.split(separator: "/") { result.append(path: String(component)) }
         return result
     }
+    func browsedSMBURL(_ file: URL, connection: LibrarySource) async throws -> URL {
+        let components = SMBClient.pathComponents(file)
+        guard components.count >= 2, let share = components.first,
+              SMBClient.serverURL(file) == SMBClient.serverURL(connection.url) else {
+            throw SourceWorker.failure("此视频不在当前 SMB 共享中。")
+        }
+        var source = connection
+        source.url = SMBClient.serverURL(file).appending(component: String(share))
+        return try await playbackURL(source: source, path: components.dropFirst().joined(separator: "/"))
+    }
     func scan(_ source: LibrarySource, credentials: SourceCredentials) async throws -> ScanResult {
         if source.kind == .smb && LibrarySource.smbURL(source.url.absoluteString) == nil { throw SourceWorker.failure("请先选择一个 SMB 共享文件夹。") }
         let (config, remote) = try await RcloneTool.configuration(kind: source.kind, url: source.url, credentials: credentials)
@@ -186,7 +196,7 @@ actor RemoteSources {
     }
     private func start(source: LibrarySource, key: SessionKey, ticket: UUID) async throws -> URL {
         defer { if starting[key]?.0 == ticket { starting[key] = nil } }
-        let credentials = try await credentialsProvider(source.id)
+        let credentials = try await credentialsProvider(source.credentialID)
         try Task.checkCancellation()
         if source.kind.mediaServer {
             let bridge = try HTTPMediaBridge(source: source, credentials: credentials)

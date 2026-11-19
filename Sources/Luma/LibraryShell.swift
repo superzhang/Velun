@@ -3,9 +3,9 @@ import AppKit
 import AVFoundation
 
 enum Destination: Hashable {
-    case home, recent, all, movies, shows, unwatched, favorites, top, genres, unmatched, files, missing, source(UUID), playlist(String), collection(String)
+    case home, libraryOverview, recent, all, movies, shows, unwatched, favorites, top, genres, unmatched, files, missing, source(UUID), playlist(String), collection(String)
     var title: String {
-        switch self { case .home: "主屏幕"; case .recent: "最近添加"; case .all: "全部视频"; case .movies: "电影"; case .shows: "电视剧"; case .unwatched: "未观看的"; case .favorites: "我的收藏"; case .top: "最受好评的电影"; case .genres: "电影类型"; case .unmatched: "待匹配"; case .files: "文件"; case .missing: "缺失文件"; case .source: "文件来源"; case .playlist(let name): name; case .collection(let name): name }
+        switch self { case .home: "主屏幕"; case .libraryOverview: "媒体库"; case .recent: "最近添加"; case .all: "全部视频"; case .movies: "电影"; case .shows: "电视剧"; case .unwatched: "未观看的"; case .favorites: "我的收藏"; case .top: "最受好评的电影"; case .genres: "电影类型"; case .unmatched: "待匹配"; case .files: "文件"; case .missing: "缺失文件"; case .source: "文件来源"; case .playlist(let name): name; case .collection(let name): name }
     }
 }
 
@@ -16,24 +16,25 @@ struct RootView: View {
     @Bindable var metadata: MetadataStore
     @Environment(\.openSettings) private var openSettings
     @State private var destination: Destination = .home
+    @State private var returnsToLibraryOverview = false
     @State private var detailID: UUID?
     @State private var selectedDetailID: UUID?
     @State private var search = ""
     @FocusState private var searchFocused: Bool
     @State private var queryCache = LibraryQueryCache()
-    @State private var homeExpanded = true
+    @State private var homeExpanded = false
     @State private var libraryExpanded = false
     @State private var filesExpanded = false
-    @State private var showSources = false
+    @State private var sourcePanel: SourcePanelOpening?
     @State private var showTMDB = false
-    @State private var showURL = false
     @State private var matching: Media?
-    @State private var folder = ""
-    @State private var address = ""
-    @State private var addressError: String?
     @State private var finderError: String?
     @State private var locatingInFinder = false
+    @State private var refreshingLocalMetadata = false
+    @AppStorage("library.showHomeShortcut") private var showLibraryShortcut = true
     @AppStorage("library.listMode") private var listMode = false
+    @AppStorage("files.listMode") private var filesInList = false
+    @AppStorage("files.descendingNames") private var descendingFileNames = false
     @AppStorage("library.sort") private var sort = "recent"
     @State private var localOnly = false
     @State private var selectedGenre: String?
@@ -41,42 +42,77 @@ struct RootView: View {
     @State private var featuredMediaID: UUID?
     @AppStorage("library.posterWidth") private var posterWidth = 155.0
     private let background = LumaTheme.canvas
-    private var allGroups: [MediaGroup] { library.groupedItems }
-    private var detail: MediaGroup? { detailID.flatMap { library.group(containing: $0) } }
-    private var selectedSource: LibrarySource? {
-        if case .source(let id) = destination { return sources.sources.first { $0.id == id } }; return nil
+    private var excludedSourceIDs: Set<UUID> {
+        switch destination {
+        case .files, .missing, .source: []
+        default: sources.excludedSourceIDs
+        }
+    }
+    private var detail: MediaGroup? {
+        guard let detailID, let group = library.group(containing: detailID) else { return nil }
+        let excluded = excludedSourceIDs
+        if excluded.isEmpty { return group }
+        let visible = group.items.filter { item in
+            item.sourceID.map { !excluded.contains($0) } ?? true
+        }
+        if visible.count == group.items.count { return group }
+        return visible.isEmpty ? nil : MediaGroup(id: group.id, items: visible)
+    }
+    private var showsLibraryOverview: Bool {
+        destination == .libraryOverview && detailID == nil && search.isEmpty
+    }
+    private var fileWorkspace: Bool {
+        switch destination {
+        case .files, .source: true
+        default: false
+        }
+    }
+    private var fileSourceID: UUID? {
+        if case .source(let id) = destination { return id }
+        return nil
     }
     private var groups: [MediaGroup] {
-        queryCache.groups(in: library, destination: destination, search: search, localOnly: localOnly, sourceID: selectedSource?.id, genre: selectedGenre, sort: sort)
+        queryCache.groups(in: library, destination: destination, search: search, localOnly: localOnly, genre: selectedGenre, sort: sort, excludedSourceIDs: excludedSourceIDs)
     }
     var body: some View {
-        Group {
-            if playback.media != nil { PlaybackView(playback: playback) }
-            else {
+        ZStack {
+            if playback.media == nil || fileWorkspace {
                 HStack(spacing: 0) {
                     sidebar
-                    VStack(spacing: 0) {
-                        toolbar
-                        Divider().opacity(0.25)
-                        if let detail {
-                            DetailView(group: detail, library: library, metadata: metadata, playback: playback, sourceName: sources.sources.first { $0.id == detail.representative.sourceID }?.name, play: { playback.open($0) }, match: { matching = $0 }, selectionChanged: { selectedDetailID = $0.id }, finderAction: finderAction)
-                        } else if destination == .files { filesPage }
-                        else if destination == .missing {
-                            MissingFilesView(library: library, sources: sources, metadata: metadata, search: search)
-                        }
-                        else if selectedSource != nil { sourceBrowser }
-                        else if destination == .genres && selectedGenre == nil && search.isEmpty { genrePage }
-                        else if destination == .home && search.isEmpty { homePage }
-                        else { gridPage }
-                        if sources.busy || metadata.busy || library.error != nil || !metadata.configured || metadata.needsAttention { activityBar }
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity).background(background)
+                    if destination == .files {
+                        filesHome
+                    } else if let fileSourceID {
+                        SourcesView(store: sources, library: library, metadata: metadata, play: playback.open,
+                                    initialSourceID: fileSourceID, filter: search, backToFiles: { navigate(.files) })
+                            .id(fileSourceID)
+                    } else {
+                        VStack(spacing: 0) {
+                            toolbar
+                            Divider().opacity(0.25)
+                            if let detail {
+                                DetailView(group: detail, library: library, metadata: metadata, playback: playback, sourceName: sources.sources.first { $0.id == detail.representative.sourceID }?.name, play: { playback.open($0) }, match: { matching = $0 }, selectionChanged: { selectedDetailID = $0.id }, finderAction: finderAction)
+                            } else if showsLibraryOverview { libraryOverview }
+                            else if destination == .missing {
+                                MissingFilesView(library: library, sources: sources, metadata: metadata, search: search)
+                            }
+                            else if destination == .genres && selectedGenre == nil && search.isEmpty { genrePage }
+                            else if destination == .home && search.isEmpty { homePage }
+                            else { gridPage }
+                            if !showsLibraryOverview && (sources.busy || metadata.busy || library.error != nil || !metadata.configured || metadata.needsAttention) { activityBar }
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(background)
+                    }
                 }
+                .opacity(playback.media == nil ? 1 : 0)
+                .allowsHitTesting(playback.media == nil)
+                .accessibilityHidden(playback.media != nil)
             }
+            if playback.media != nil { PlaybackView(playback: playback) }
         }
         .background(background)
-        .sheet(isPresented: $showSources) { SourcesView(store: sources, library: library, metadata: metadata).tint(.orange) }
+        .sheet(item: $sourcePanel) { opening in
+            SourcesView(store: sources, library: library, metadata: metadata, play: playback.open, opening: opening)
+        }
         .sheet(isPresented: $showTMDB) { TMDBSettingsView(store: metadata, library: library).tint(.orange) }
-        .sheet(isPresented: $showURL) { urlSheet }
         .sheet(item: $matching) { item in MatchView(media: item, library: library, store: metadata).tint(.orange) }
         .alert("无法在 Finder 中显示", isPresented: Binding(
             get: { finderError != nil }, set: { if !$0 { finderError = nil } }
@@ -93,7 +129,7 @@ struct RootView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("搜索", text: $search).textFieldStyle(.plain).focused($searchFocused).accessibilityLabel("搜索媒体库")
+                TextField(fileWorkspace ? "搜索文件" : "搜索", text: $search).textFieldStyle(.plain).focused($searchFocused).accessibilityLabel(fileWorkspace ? "搜索当前目录" : "搜索媒体库")
                 if !search.isEmpty { Button { search = ""; searchFocused = true } label: { Image(systemName: "xmark.circle.fill").frame(width: 32, height: 44).contentShape(Rectangle()) }.buttonStyle(.plain).accessibilityLabel("清空搜索") }
             }.padding(.horizontal, 11).frame(height: 44)
                 .background { Capsule().fill(LumaTheme.ink.opacity(0.085)).contentShape(Capsule()).onTapGesture { searchFocused = true } }
@@ -109,7 +145,7 @@ struct RootView: View {
                         nav("未观看的", icon: "eye.slash", target: .unwatched, indented: true)
                         nav("最受好评的电影", icon: "star", target: .top, indented: true)
                     }
-                    sidebarHeader("媒体库", icon: "externaldrive", destination: .all, expanded: $libraryExpanded)
+                    sidebarHeader("媒体库", icon: "externaldrive", destination: .libraryOverview, expanded: $libraryExpanded)
                     if libraryExpanded {
                         nav("全部视频", icon: "square.grid.2x2", target: .all, indented: true)
                         nav("电影", icon: "film", target: .movies, indented: true)
@@ -119,13 +155,9 @@ struct RootView: View {
                     }
                     sidebarHeader("文件", icon: "folder", destination: .files, expanded: $filesExpanded)
                     if filesExpanded {
-                        nav("缺失文件", icon: "exclamationmark.triangle", target: .missing, indented: true)
-                        ForEach(sources.sources) { source in nav(source.name, icon: "folder", target: .source(source.id), indented: true) }
-                        Button { showSources = true } label: {
-                            Label("添加文件来源…", systemImage: "plus.circle").foregroundStyle(.secondary)
-                                .padding(.leading, 30).padding(.trailing, 10)
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(SidebarButtonStyle())
+                        ForEach(sources.starredSMBFolders) { source in
+                            nav(source.url.lastPathComponent, icon: "folder", target: .source(source.id), indented: true)
+                        }
                     }
                 }.padding(.horizontal, 12)
             }
@@ -139,14 +171,17 @@ struct RootView: View {
         }.frame(width: 250).background(LumaTheme.sidebar)
     }
     private func sidebarHeader(_ title: String, icon: String, destination target: Destination, expanded: Binding<Bool>) -> some View {
-        HStack(spacing: 0) {
+        let selected = detailID == nil && (destination == target || (target == .files && fileSourceID != nil))
+            && (search.isEmpty || target == .files)
+        return HStack(spacing: 0) {
             Button { navigate(target) } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: icon).foregroundStyle(.orange).accessibilityHidden(true)
+                    Image(systemName: icon).foregroundStyle(LumaTheme.navigationAccent).accessibilityHidden(true)
                     Text(title).foregroundStyle(LumaTheme.ink.opacity(0.9)).lineLimit(1)
                 }.font(.system(size: 15, weight: .semibold)).padding(.leading, 14)
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(SidebarButtonStyle())
+                .accessibilityAddTraits(selected ? .isSelected : [])
             Button { expanded.wrappedValue.toggle() } label: {
                 Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
                     .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -154,12 +189,12 @@ struct RootView: View {
             }.buttonStyle(SidebarButtonStyle())
                 .accessibilityLabel("展开或收起 \(title)")
                 .accessibilityValue(expanded.wrappedValue ? "已展开" : "已收起")
-        }.background(destination == target && detailID == nil ? LumaTheme.ink.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 9))
+        }.background(selected ? LumaTheme.ink.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 9))
     }
     private func nav(_ title: String, icon: String, target: Destination, indented: Bool) -> some View {
         Button { navigate(target) } label: {
             HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 18)).foregroundStyle(.orange).frame(width: 22).accessibilityHidden(true)
+                Image(systemName: icon).font(.system(size: 18)).foregroundStyle(LumaTheme.navigationAccent).frame(width: 22).accessibilityHidden(true)
                 Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(LumaTheme.ink.opacity(0.9)).lineLimit(1)
                 Spacer(minLength: 0)
             }.padding(.leading, indented ? 30 : 14).padding(.trailing, 10)
@@ -167,17 +202,24 @@ struct RootView: View {
         }.buttonStyle(SidebarButtonStyle(selected: destination == target && detailID == nil))
             .accessibilityAddTraits(destination == target && detailID == nil ? .isSelected : [])
     }
-    private func navigate(_ target: Destination) { destination = target; detailID = nil; folder = ""; search = ""; selectedGenre = nil; gridAnchor = nil; if target == .home { featuredMediaID = nil } }
+    private func navigate(_ target: Destination) {
+        destination = target
+        returnsToLibraryOverview = false
+        detailID = nil
+        search = ""
+        selectedGenre = nil
+        gridAnchor = nil
+        if target == .home { featuredMediaID = nil }
+    }
     private var toolbar: some View {
         HStack(spacing: 18) {
             Button {
                 if detailID != nil { detailID = nil }
                 else if selectedGenre != nil { selectedGenre = nil }
-                else if !folder.isEmpty { folder = folder.split(separator: "/").dropLast().joined(separator: "/") }
+                else if returnsToLibraryOverview { navigate(.libraryOverview) }
                 else { navigate(.home) }
-            } label: { Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).frame(width: 28, height: 28) }.buttonStyle(.plain).disabled(detailID == nil && folder.isEmpty && destination == .home).help("返回")
+            } label: { Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).frame(width: 28, height: 28) }.buttonStyle(.plain).disabled(detailID == nil && destination == .home).help("返回")
             if let detail { Text(detail.title).font(.headline).lineLimit(1) }
-            else if selectedSource != nil { Text(folder.isEmpty ? (selectedSource?.name ?? "文件") : String(folder.split(separator: "/").last ?? "")).font(.headline).lineLimit(1) }
             else { Text(search.isEmpty ? (selectedGenre ?? destination.title) : "搜索结果").font(.headline) }
             Spacer()
             if detailID == nil && destination == .home && search.isEmpty && !sources.networkFileShares.isEmpty {
@@ -193,7 +235,7 @@ struct RootView: View {
                     Label("刷新 NAS", systemImage: "arrow.clockwise")
                 }.disabled(sources.busy).help("扫描已连接的 NAS 共享")
             }
-            if detailID == nil && destination != .files && destination != .missing && selectedSource == nil {
+            if detailID == nil && !showsLibraryOverview && destination != .files && destination != .missing {
                 Picker("显示范围", selection: $localOnly) { Text("全部").tag(false); Text("本地文件").tag(true) }.pickerStyle(.segmented).labelsHidden().frame(width: 160)
                 Button { listMode.toggle() } label: { Image(systemName: listMode ? "square.grid.2x2" : "list.bullet").font(.system(size: 16)) }.buttonStyle(.plain).help(listMode ? "海报模式" : "列表模式").accessibilityLabel(listMode ? "海报模式" : "列表模式")
             }
@@ -201,7 +243,7 @@ struct RootView: View {
                 DetailActions(group: detail, selected: detail.items.first { $0.id == selectedDetailID } ?? detail.resume, library: library, playback: playback, match: { matching = $0 })
             } else {
             Menu {
-                if detailID == nil && destination != .missing {
+                if detailID == nil && !showsLibraryOverview && destination != .missing {
                     ControlGroup {
                         Button("缩小海报") { posterWidth = max(120, posterWidth - 15) }
                         Button("放大海报") { posterWidth = min(220, posterWidth + 15) }
@@ -209,12 +251,71 @@ struct RootView: View {
                     Picker("排序", selection: $sort) { Text("最近添加").tag("recent"); Text("名称").tag("name"); Text("年份").tag("year"); Text("评分").tag("rating") }
                 }
                 Button("导入视频…") { Importer.files(library) }
-                Button("添加文件…") { showSources = true }
+                Button("添加文件…") { sourcePanel = .add }
                 Button("TMDB 海报设置…") { showTMDB = true }
-                Button("添加网络视频…") { showURL = true }
+                Button("添加网络视频…") { sourcePanel = .directURL }
             } label: { Image(systemName: "ellipsis.circle").font(.system(size: 19)) }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("更多")
             }
         }.padding(.horizontal, 24).frame(height: 56)
+    }
+    private var libraryOverview: some View {
+        let visibleGroups = queryCache.groups(in: library, destination: .libraryOverview, excludedSourceIDs: excludedSourceIDs)
+        return LibraryOverview(
+            groups: visibleGroups,
+            sources: sources,
+            metadata: metadata,
+            libraryError: library.error,
+            refreshingLocalMetadata: refreshingLocalMetadata,
+            showLibraryShortcut: $showLibraryShortcut,
+            browse: { target in
+                navigate(target)
+                libraryExpanded = true
+                returnsToLibraryOverview = true
+            },
+            manageSources: { sourcePanel = .savedShares },
+            refreshLibrary: { sources.refreshLibrary(library: library, metadata: metadata) },
+            refreshMetadata: refreshLibraryMetadata,
+            configureMetadata: { showTMDB = true }
+        )
+    }
+    private func refreshLibraryMetadata() {
+        guard !refreshingLocalMetadata, !metadata.busy else { return }
+        refreshingLocalMetadata = true
+        Task {
+            await library.refreshLocalSidecars()
+            refreshingLocalMetadata = false
+            metadata.matchMissing(library, retryReviewed: true)
+        }
+    }
+    private var filesHome: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("文件").font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer()
+                FileLayoutButton(listMode: $filesInList)
+                Menu {
+                    Picker("按名称排序", selection: $descendingFileNames) {
+                        Text("升序").tag(false)
+                        Text("降序").tag(true)
+                    }
+                    Divider()
+                    Button("通过直接 URL") { sourcePanel = .directURL }
+                    Button("下载") { sourcePanel = .downloads }
+                    Button("本地视频与链接") { sourcePanel = .imported }
+                    Button("缺失文件") { navigate(.missing) }
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.system(size: 18))
+                }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("文件更多操作")
+                Button { sourcePanel = .add } label: {
+                    Label("新增文件来源", systemImage: "plus")
+                }.buttonStyle(.borderedProminent).tint(LumaTheme.navigationAccent).controlSize(.large)
+            }.padding(.horizontal, 24).frame(height: 56)
+            Divider().opacity(0.45)
+            FileFavoritesPage(folders: sources.starredSMBFolders, filter: search, listMode: filesInList,
+                              descendingNames: descendingFileNames, open: { navigate(.source($0.id)) },
+                              addSource: { sourcePanel = .add })
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(background)
     }
     private var isCustomList: Bool { switch destination { case .playlist, .collection: true; default: false } }
     private var gridPage: some View {
@@ -282,7 +383,9 @@ struct RootView: View {
                     homeSectionHeader("收藏夹")
                     HoverScrollRow {
                         LazyHStack(spacing: 16) {
-                            homeShortcut("媒体库", icon: "square.stack.3d.up", detail: "\(values.count) 个作品", target: .all)
+                            if showLibraryShortcut {
+                                homeShortcut("媒体库", icon: "square.stack.3d.up", detail: "\(values.count) 个作品", target: .all)
+                            }
                             homeShortcut("电影", icon: "film", detail: "\(movies.count) 个作品", target: .movies)
                             homeShortcut("电视剧", icon: "tv", detail: "\(shows.count) 个系列", target: .shows)
                             homeShortcut("我的收藏", icon: "heart", detail: "\(favorites.count) 个作品", target: .favorites)
@@ -400,87 +503,13 @@ struct RootView: View {
             }.padding(28)
         }
     }
-    private var filesPage: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    Text("文件来源").font(.system(size: 26, weight: .semibold))
-                    Spacer()
-                    Button { navigate(.missing) } label: {
-                        Label("缺失文件（\(library.items.lazy.filter { $0.sourceMissing == true }.count)）", systemImage: "exclamationmark.triangle")
-                    }.controlSize(.large)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 20)], spacing: 20) {
-                    ForEach(sources.sources) { source in
-                        Button { navigate(.source(source.id)) } label: {
-                            VStack(alignment: .leading, spacing: 16) {
-                                Image(systemName: "externaldrive.connected.to.line.below").font(.system(size: 40, weight: .light)).foregroundStyle(.orange)
-                                Text(source.name).font(.title3.weight(.semibold))
-                                HStack(spacing: 8) {
-                                    Text(source.protocolTitle).foregroundStyle(.secondary)
-                                    if let issue = sources.scanIssues[source.id] {
-                                        Label(issue.title, systemImage: "exclamationmark.triangle")
-                                            .foregroundStyle(.orange).help(issue.detail)
-                                    }
-                                }.font(.caption)
-                            }.frame(maxWidth: .infinity, minHeight: 145, alignment: .leading).padding(24).background(LumaTheme.ink.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
-                        }.buttonStyle(.plain)
-                    }
-                    Button { showSources = true } label: {
-                        VStack(spacing: 16) { Image(systemName: "plus.circle").font(.system(size: 38, weight: .light)); Text("添加文件来源") }.frame(maxWidth: .infinity, minHeight: 145).padding(24).foregroundStyle(.orange).background(LumaTheme.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
-                    }.buttonStyle(.plain)
-                }
-                Button("管理来源与扫描…") { showSources = true }.controlSize(.large)
-                Divider()
-                HStack { Button("导入本地视频…") { Importer.files(library) }; Button("添加网络视频地址…") { showURL = true } }
-            }.padding(32)
-        }
-    }
-    private var sourceBrowser: some View {
-        let prefix = folder.isEmpty ? "" : folder + "/"
-        let files = library.items.filter { $0.sourceID == selectedSource?.id && ($0.relativePath ?? "").hasPrefix(prefix) }
-        let folders = Array(Set(files.compactMap { item -> String? in
-            let tail = String((item.relativePath ?? "").dropFirst(prefix.count)); let parts = tail.split(separator: "/")
-            return parts.count > 1 ? String(parts[0]) : nil
-        })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-        let direct = files.filter { !String(($0.relativePath ?? "").dropFirst(prefix.count)).contains("/") }
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(folder.isEmpty ? (selectedSource?.name ?? "来源") : folder).font(.title2.weight(.semibold)).lineLimit(1)
-                    Spacer()
-                    Button("连接并重新扫描") { if let source = selectedSource { sources.scan(source, library: library, metadata: metadata) } }.disabled(sources.busy)
-                }.padding(.bottom, 16)
-                if let source = selectedSource, let issue = sources.scanIssues[source.id] {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(issue.title, systemImage: "exclamationmark.triangle").font(.callout.weight(.semibold))
-                        Text(issue.detail).font(.callout).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                }
-                ForEach(folders, id: \.self) { name in
-                    Button { folder = prefix + name } label: { HStack { Image(systemName: "folder.fill").font(.title2).foregroundStyle(.orange); Text(name); Spacer(); Image(systemName: "chevron.right").foregroundStyle(.secondary) }.padding(14).contentShape(Rectangle()) }.buttonStyle(.plain)
-                    Divider().opacity(0.25)
-                }
-                ForEach(direct) { item in
-                    Button { detailID = item.id } label: { HStack { Image(systemName: "film").font(.title2).foregroundStyle(.secondary); Text(item.url.lastPathComponent).lineLimit(1); Spacer(); if item.sourceMissing == true { Text("文件缺失").foregroundStyle(.orange) } else if item.isWatched { Image(systemName: "checkmark").foregroundStyle(.orange) }; Text(item.format).font(.caption).foregroundStyle(.secondary) }.padding(14).contentShape(Rectangle()) }.buttonStyle(.plain)
-                    Divider().opacity(0.25)
-                }
-                if folders.isEmpty && direct.isEmpty { Text("还没有扫描到视频，请先连接并扫描这个来源。") .foregroundStyle(.secondary).padding(.vertical, 36) }
-                if let error = sources.error, sources.scanIssues.isEmpty {
-                    Text(error).foregroundStyle(.orange)
-                }
-                if !sources.status.isEmpty { Text(sources.status).font(.caption).foregroundStyle(.secondary).padding(.top, 16) }
-            }.padding(28)
-        }
-    }
     private var emptyView: some View {
         ContentUnavailableView {
             Label(search.isEmpty ? "这里还没有视频" : "未找到相关视频", systemImage: search.isEmpty ? "play.rectangle.on.rectangle" : "magnifyingglass")
         } description: {
             Text(search.isEmpty ? "添加 NAS 文件来源，或导入本地视频。配置 TMDB 后会自动匹配海报。" : "试试修改片名或关键词。")
         } actions: {
-            if search.isEmpty { Button("添加文件来源") { showSources = true }.buttonStyle(.borderedProminent); Button("导入视频") { Importer.files(library) } }
+            if search.isEmpty { Button("添加文件来源") { sourcePanel = .add }.buttonStyle(.borderedProminent); Button("导入视频") { Importer.files(library) } }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var activityBar: some View {
@@ -495,19 +524,7 @@ struct RootView: View {
             if metadata.configured { Button("查看待匹配") { navigate(.unmatched) } }
         }.padding(12).background(LumaTheme.ink.opacity(0.04))
     }
-    private var urlSheet: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("添加网络视频").font(.title2.bold())
-            Text("输入 HTTP / HTTPS 视频直链或 HLS 地址。暂不支持网页和网盘分享页。") .foregroundStyle(.secondary)
-            TextField("视频地址", text: $address, prompt: Text("https://example.com/movie.mp4")).textFieldStyle(.roundedBorder).onSubmit { addURL() }
-            if let addressError { Text(addressError).foregroundStyle(.orange) }
-            HStack { Spacer(); Button("取消") { showURL = false }.keyboardShortcut(.cancelAction); Button("添加") { addURL() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
-        }.padding(28).frame(width: 480)
-    }
-    private func addURL() {
-        guard let url = Media.streamURL(address) else { addressError = "请输入有效的 HTTP / HTTPS 地址，且不要在地址中包含账号密码。"; return }
-        library.add([url]); address = ""; addressError = nil; showURL = false
-    }
+
 }
 
 struct LibraryPoster: View {
@@ -563,7 +580,7 @@ struct PosterArtwork: View {
 
 // Keep the hit shape inside the button label: transparent spacers and padding
 // must receive the same action as the text. Hover/press feedback uses the same bounds.
-private struct SidebarButtonStyle: ButtonStyle {
+struct SidebarButtonStyle: ButtonStyle {
     var selected = false
     func makeBody(configuration: Configuration) -> some View {
         SidebarButtonSurface(label: configuration.label, selected: selected, pressed: configuration.isPressed)

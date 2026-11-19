@@ -63,6 +63,39 @@ import Testing
     #expect(cache.groups(in: other, destination: .all).isEmpty)
 }
 
+@Test @MainActor func librarySourceInclusionFiltersMixedGroupsAndPersists() throws {
+    let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let sourceFile = folder.appending(path: "sources.json")
+    let sourceRoot = folder.appending(path: "Shared")
+    let sources = SourcesStore(file: sourceFile)
+    let source = sources.add(name: "Shared", url: sourceRoot)
+    let library = Library(file: folder.appending(path: "library.json"))
+    library.importSource(source.id, files: [
+        ScannedFile(url: sourceRoot.appending(path: "Show.S01E01.mkv"), relativePath: "Show.S01E01.mkv"),
+        ScannedFile(url: sourceRoot.appending(path: "Movie.mkv"), relativePath: "Movie.mkv")
+    ])
+    let localEpisode = folder.appending(path: "Show.S01E02.mkv")
+    library.add([localEpisode])
+    let query = LibraryQueryCache()
+    let initial = query.groups(in: library, destination: .libraryOverview)
+    #expect(initial.count == 2)
+    #expect(initial.first(where: \.isTV)?.items.count == 2)
+
+    sources.setLibraryInclusion(false, for: source.id)
+    let restored = SourcesStore(file: sourceFile)
+    #expect(restored.excludedSourceIDs == [source.id])
+    #expect(restored.librarySources.isEmpty)
+    let visible = query.groups(in: library, destination: .libraryOverview, excludedSourceIDs: restored.excludedSourceIDs)
+    #expect(visible.count == 1)
+    #expect(visible.first?.items.map(\.url) == [localEpisode])
+    #expect(query.groups(in: library, destination: .all, sourceID: source.id).count == 2)
+
+    restored.setLibraryInclusion(true, for: source.id)
+    #expect(SourcesStore(file: sourceFile).excludedSourceIDs.isEmpty)
+    #expect(query.groups(in: library, destination: .libraryOverview, excludedSourceIDs: restored.excludedSourceIDs).count == 2)
+}
+
 @Test @MainActor func backgroundSaveCoalescesAndFlushesLatestState() async throws {
     let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: folder) }

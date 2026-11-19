@@ -10,16 +10,17 @@ import Foundation
         let sourceID: UUID?
         let genre: String?
         let sort: String
+        let excludedSourceIDs: Set<UUID>
     }
     private var key: Key?
     private var result: [MediaGroup] = []
-    func groups(in library: Library, destination: Destination, search: String = "", localOnly: Bool = false, sourceID: UUID? = nil, genre: String? = nil, sort: String = "recent") -> [MediaGroup] {
-        let key = Key(libraryID: ObjectIdentifier(library), revision: library.revision, destination: destination, search: search, localOnly: localOnly, sourceID: sourceID, genre: genre, sort: sort)
+    func groups(in library: Library, destination: Destination, search: String = "", localOnly: Bool = false, sourceID: UUID? = nil, genre: String? = nil, sort: String = "recent", excludedSourceIDs: Set<UUID> = []) -> [MediaGroup] {
+        let key = Key(libraryID: ObjectIdentifier(library), revision: library.revision, destination: destination, search: search, localOnly: localOnly, sourceID: sourceID, genre: genre, sort: sort, excludedSourceIDs: excludedSourceIDs)
         if self.key == key { return result }
         let needle = MediaGroup.searchKey(search)
         var groups = library.groupedItems
         let customList: Bool = switch destination { case .playlist, .collection: true; default: false }
-        if localOnly || sourceID != nil || customList {
+        if localOnly || sourceID != nil || customList || !excludedSourceIDs.isEmpty {
             groups = groups.compactMap { group in
                 let values = group.items.filter { item in
                     let membership: Bool = switch destination {
@@ -27,8 +28,10 @@ import Foundation
                     case .collection(let name): item.collectionName == name
                     default: true
                     }
-                    return membership && (!localOnly || item.isLocalFile) && (sourceID == nil || item.sourceID == sourceID)
+                    let excluded = item.sourceID.map { excludedSourceIDs.contains($0) } ?? false
+                    return !excluded && membership && (!localOnly || item.isLocalFile) && (sourceID == nil || item.sourceID == sourceID)
                 }
+                if values.count == group.items.count { return group }
                 return values.isEmpty ? nil : MediaGroup(id: group.id, items: values)
             }
         }

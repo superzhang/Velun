@@ -20,9 +20,9 @@ swift build -c release
 BIN_DIR="$(swift build -c release --show-bin-path)"
 APP="${LUMA_APP_OUTPUT:-../Velun.app}"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN_DIR/Luma" "$APP/Contents/MacOS/Luma"
+cp "$BIN_DIR/Velun" "$APP/Contents/MacOS/Velun"
 # Keep local source paths in the build tree's debug symbols, outside the app.
-/usr/bin/strip -S "$APP/Contents/MacOS/Luma"
+/usr/bin/strip -S "$APP/Contents/MacOS/Velun"
 cp LICENSE THIRD_PARTY.md "$APP/Contents/Resources/"
 if [ -d "$BIN_DIR/Luma_Luma.bundle" ]; then
     ditto "$BIN_DIR/Luma_Luma.bundle" "$APP/Contents/Resources/Luma_Luma.bundle"
@@ -31,7 +31,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>Luma</string>
+<key>CFBundleExecutable</key><string>Velun</string>
 <key>CFBundleIdentifier</key><string>local.luma.player</string>
 <key>NSLocalNetworkUsageDescription</key><string>连接 NAS 和媒体服务器，并自动发现局域网中的 SMB、WebDAV、NFS 和媒体服务器。</string>
 <key>NSBonjourServices</key><array><string>_smb._tcp</string><string>_nfs._tcp</string><string>_webdav._tcp</string><string>_webdavs._tcp</string><string>_webdav-ssl._tcp</string><string>_jellyfin._tcp</string></array>
@@ -39,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Velun</string>
 <key>CFBundleDisplayName</key><string>Velun</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.23.1</string>
-<key>CFBundleVersion</key><string>36</string>
+<key>CFBundleShortVersionString</key><string>0.23.7</string>
+<key>CFBundleVersion</key><string>42</string>
 <key>LSMinimumSystemVersion</key><string>27.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>

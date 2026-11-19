@@ -56,7 +56,9 @@ struct AppSettingsView: View {
         }.frame(minWidth: 840, idealWidth: 960, minHeight: 620, idealHeight: 700)
             .preferredColorScheme((AppAppearance(rawValue: appearance) ?? .system).colorScheme)
             .tint(.orange)
-            .sheet(isPresented: $showSources) { SourcesView(store: sources, library: library, metadata: metadata).tint(.orange) }
+            .sheet(isPresented: $showSources) {
+                SourcesView(store: sources, library: library, metadata: metadata, play: playback.open, opening: .savedShares).tint(.orange)
+            }
             .sheet(isPresented: $showTMDB) { TMDBSettingsView(store: metadata, library: library).tint(.orange) }
             .onChange(of: playback.preferences.options) { _, _ in playback.applyPreferences() }
     }

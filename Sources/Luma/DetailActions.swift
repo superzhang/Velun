@@ -14,6 +14,7 @@ struct DetailActions: View {
     @State private var downloading = false
     @State private var downloadMessage = ""
     private var ids: [UUID] { group.items.map(\.id) }
+    private var selectedWatched: Bool { group.episode(containing: selected.id)?.isWatched ?? selected.isWatched }
     enum DetailPanel: String, Identifiable { case rating, playlist, collection, download; var id: String { rawValue } }
     var body: some View {
         HStack(spacing: 8) {
@@ -31,11 +32,11 @@ struct DetailActions: View {
             }.buttonStyle(DetailToolbarButtonStyle()).accessibilityLabel("影片更多操作")
                 .popover(isPresented: $showMore, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 0) {
-                Button("循环播放") { perform { playback.playQueue(group.items, shuffled: false, loop: true) } }
-                Button("随机播放") { perform { playback.playQueue(group.items, shuffled: true, loop: false) } }
+                Button("循环播放") { perform { playback.playQueue(group.playbackItems(favoring: selected.id), shuffled: false, loop: true) } }
+                Button("随机播放") { perform { playback.playQueue(group.playbackItems(favoring: selected.id), shuffled: true, loop: false) } }
                 Menu("标记为…") {
-                    Button(group.isTV ? "本集已观看" : "已观看") { perform { library.setWatched([selected.id], to: true) } }
-                    Button(group.isTV ? "本集未观看" : "未观看") { perform { library.setWatched([selected.id], to: false) } }
+                    Button(group.isTV ? "本集已观看" : "已观看") { perform { library.setEpisodeWatched(selected.id, to: true) } }
+                    Button(group.isTV ? "本集未观看" : "未观看") { perform { library.setEpisodeWatched(selected.id, to: false) } }
                     if group.items.count > 1 {
                         Divider()
                         Button("全部已观看") { perform { library.setWatched(ids, to: true) } }
@@ -97,7 +98,7 @@ struct DetailActions: View {
     }
     private var heroButtons: some View {
         HStack(spacing: 9) {
-            heroButton(selected.isWatched ? "eye.slash" : "eye", title: "切换观看状态") { library.setWatched([selected.id], to: !selected.isWatched) }
+            heroButton(selectedWatched ? "eye.slash" : "eye", title: "切换观看状态") { library.setEpisodeWatched(selected.id, to: !selectedWatched) }
             heroButton(downloading ? "arrow.down.circle" : "arrow.down.to.line", title: downloading ? "正在下载…" : "下载") { download() }.disabled(downloading)
             heroButton(selected.watchlisted == true ? "bookmark.fill" : "bookmark", title: "正在观看列表") { library.setWatchlist([selected.id], value: selected.watchlisted != true) }
             heroButton(group.hasFavorite ? "star.fill" : "star", title: group.hasFavorite ? "取消收藏" : "加入收藏") { library.setFavorite(ids, to: !group.hasFavorite) }

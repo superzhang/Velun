@@ -20,6 +20,10 @@ enum SMBClient {
         url.path(percentEncoded: false).split(separator: "/")
     }
 
+    static func playbackHistoryURL(_ url: URL) -> URL {
+        pathComponents(url).reduce(serverURL(url)) { $0.appending(component: String($1)) }
+    }
+
     static func sameFolder(_ lhs: URL, _ rhs: URL) -> Bool {
         serverURL(lhs) == serverURL(rhs) && pathComponents(lhs) == pathComponents(rhs)
     }

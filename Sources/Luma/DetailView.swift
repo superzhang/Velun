@@ -36,11 +36,12 @@ struct DetailView: View {
     let library: Library
     let metadata: MetadataStore
     let playback: Playback
-    let sourceName: String?
+    let sourceName: (Media) -> String?
     let play: (Media) -> Void
     let match: (Media) -> Void
     let selectionChanged: (Media) -> Void
     let finderAction: (Media) -> (() -> Void)?
+    let openPerformer: (CastMember) -> Void
     @State private var detailWidth: CGFloat = 1000
     @State private var technical: MediaTechnicalInfo?
     private var dimensions: VideoDimensions? { technical?.dimensions }
@@ -52,10 +53,16 @@ struct DetailView: View {
     @State private var episodeInfo: [Int: EpisodeInfo] = [:]
     @State private var loadingEpisodes = false
     private var currentSeason: Int { seasons.contains(season) ? season : EpisodeCode(group.resume).season }
-    private var seasons: [Int] { Set(group.items.map { EpisodeCode($0).season }).sorted() }
-    private var episodes: [Media] { group.items.filter { EpisodeCode($0).season == currentSeason } }
+    private var seasons: [Int] { Set(group.episodes.map { $0.code.season }).sorted() }
+    private var episodes: [EpisodeSlot] { group.episodes.filter { $0.code.season == currentSeason } }
+    private var activeEpisodeSlot: EpisodeSlot? {
+        let preferred = selectedEpisodeID ?? group.resume.id
+        return episodes.first { $0.files.contains { $0.id == preferred } }
+            ?? episodes.first { $0.files.contains { $0.sourceMissing != true } }
+            ?? episodes.first
+    }
     private var activeEpisode: Media {
-        episodes.first { $0.id == selectedEpisodeID } ?? episodes.first { $0.id == group.resume.id } ?? episodes.first { $0.sourceMissing != true } ?? episodes.first ?? group.resume
+        activeEpisodeSlot?.preferredFile(favoring: selectedEpisodeID ?? group.resume.id) ?? group.resume
     }
     private var displayedItem: Media { group.isTV ? activeEpisode : group.representative }
     private var selectedInfo: EpisodeInfo? { group.isTV ? episodeInfo[EpisodeCode(activeEpisode).episode] : nil }
@@ -73,7 +80,7 @@ struct DetailView: View {
                 if let cast = group.info?.cast, !cast.isEmpty { castSection(cast) }
                 VStack(alignment: .leading, spacing: 12) {
                     Text("文件信息").font(.system(size: 20, weight: .semibold))
-                    Text(sourceName.map { "在 \($0) 上" } ?? (displayedItem.url.isFileURL ? "本地文件" : "网络视频")).foregroundStyle(.secondary)
+                    Text(sourceName(displayedItem).map { "在 \($0) 上" } ?? (displayedItem.url.isFileURL ? "本地文件" : "网络视频")).foregroundStyle(.secondary)
                     if displayedItem.sourceMissing == true { Label("文件缺失", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
                     Text(displayedItem.url.lastPathComponent).font(.system(size: 13)).textSelection(.enabled)
                     HStack(spacing: 12) {
@@ -267,10 +274,11 @@ struct DetailView: View {
         }
     }
     private var episodesSection: some View {
-        EpisodeCarousel(items: episodes, info: episodeInfo, selectedID: activeEpisode.id, seasons: seasons,
+        EpisodeCarousel(items: episodes, info: episodeInfo, selectedID: activeEpisode.id, selectedSlot: activeEpisodeSlot,
+                        sourceName: sourceName, seasons: seasons,
                         season: Binding(get: { currentSeason }, set: { season = $0; selectedEpisodeID = nil }),
                         loading: loadingEpisodes, select: { selectedEpisodeID = $0.id }, play: play,
-                        setWatched: { library.setWatched([$0.id], to: $1) }, restart: { item in
+                        setWatched: { library.setEpisodeWatched($0.id, to: $1) }, restart: { item in
                             library.reset(item.id)
                             if let fresh = library.items.first(where: { $0.id == item.id }) { play(fresh) }
                         })
@@ -288,11 +296,7 @@ struct DetailView: View {
             HoverScrollRow {
                 LazyHStack(alignment: .top, spacing: 16) {
                     ForEach(cast) { member in
-                        VStack(alignment: .leading, spacing: 8) {
-                            PosterView(url: member.photo).frame(width: 82, height: 110).clipShape(RoundedRectangle(cornerRadius: 12))
-                            Text(member.name).font(.caption.weight(.medium)).lineLimit(2)
-                            Text(member.character).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                        }.frame(width: 82, alignment: .leading)
+                        PerformerCard(member: member) { openPerformer(member) }
                     }
                 }.padding(.horizontal, 32)
             }.scrollIndicators(.hidden)
@@ -301,5 +305,36 @@ struct DetailView: View {
     private func time(_ seconds: Double) -> String {
         let value = Int(seconds.isFinite ? max(0, seconds) : 0)
         return value >= 3600 ? String(format: "%d:%02d:%02d", value / 3600, value / 60 % 60, value % 60) : String(format: "%02d:%02d", value / 60, value % 60)
+    }
+}
+
+private struct PerformerCard: View {
+    let member: CastMember
+    let open: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: open) {
+            VStack(alignment: .leading, spacing: 8) {
+                PosterView(url: member.photo, placeholderSymbol: "person.fill")
+                    .frame(width: 82, height: 110)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(LumaTheme.navigationAccent, lineWidth: hovered ? 2 : 0)
+                    }
+                Text(member.name).font(.caption.weight(.medium)).lineLimit(2)
+                if !member.character.isEmpty {
+                    Text(member.character).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            .frame(width: 82, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .accessibilityLabel(member.name)
+        .accessibilityHint("查看演员在媒体库里的作品")
+        .help("查看\(member.name)的作品")
     }
 }

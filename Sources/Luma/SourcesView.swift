@@ -19,6 +19,7 @@ struct SourcesView: View {
     var initialSourceID: UUID?
     var filter = ""
     var backToFiles: (() -> Void)?
+    var playQueue: (([Media], Bool, Bool) -> Void)?
     @AppStorage("files.listMode") private var filesInList = false
     @AppStorage("files.descendingNames") private var descendingFileNames = false
     private let downloads = OfflineDownloads.shared
@@ -43,6 +44,7 @@ struct SourcesView: View {
     @State private var smbConnection: LibrarySource?
     @State private var smbCredentials: SourceCredentials?
     @State private var smbFolders: [FileDirectoryEntry] = []
+    @State private var selectedSMBEntries: [String: String] = [:]
     @State private var smbTask: Task<Void, Never>?
     @State private var smbLoading = false
     @State private var preparingPlayback = false
@@ -51,6 +53,9 @@ struct SourcesView: View {
     @State private var availableStorage: String?
     @FocusState private var addressFocused: Bool
     private var embedded: Bool { backToFiles != nil }
+    private var smbDirectoryKey: String? {
+        smbURL.map { SMBClient.pathComponents($0).joined(separator: "/") }
+    }
     private var smbParent: URL? {
         guard let current = smbRequestedURL ?? smbURL, !SMBClient.pathComponents(current).isEmpty else { return nil }
         if embedded, let root = smbConnection?.url, SMBClient.sameFolder(current, root) { return nil }
@@ -91,12 +96,24 @@ struct SourcesView: View {
                         Spacer()
                         FileLayoutButton(listMode: $filesInList)
                         Menu {
+                            if let directory = smbDirectoryKey, let selected = selectedSMBEntries[directory],
+                               let entry = smbFolders.first(where: { $0.name == selected }),
+                               filter.isEmpty || entry.name.localizedStandardContains(filter) {
+                                Button("打开所选项目") { openSMBEntry(entry) }.disabled(smbLoading || preparingPlayback)
+                                Divider()
+                            }
                             Picker("按名称排序", selection: $descendingFileNames) {
                                 Text("升序").tag(false)
                                 Text("降序").tag(true)
                             }
                             if let url = smbURL {
                                 Divider()
+                                if playQueue != nil, smbFolders.contains(where: { !$0.isDirectory }) {
+                                    Button("播放当前目录") { playSMBDirectory() }.disabled(smbLoading || preparingPlayback)
+                                    Button("循环播放") { playSMBDirectory(loop: true) }.disabled(smbLoading || preparingPlayback)
+                                    Button("随机播放") { playSMBDirectory(shuffled: true) }.disabled(smbLoading || preparingPlayback)
+                                    Divider()
+                                }
                                 Button(store.smbFolder(at: url)?.isMediaSource == true ? "取消收藏此文件夹" : "收藏此文件夹") {
                                     toggleSMBFolder(url)
                                 }.disabled(smbLoading || smbCredentials == nil)
@@ -123,7 +140,8 @@ struct SourcesView: View {
                         case .saved:
                             if let source = selectedSource {
                                 SavedSourceFileBrowser(source: source, library: library, filter: filter, play: openMedia, download: downloadMedia,
-                                                       listMode: !embedded || filesInList, descendingNames: embedded && descendingFileNames)
+                                                       listMode: !embedded || filesInList, descendingNames: embedded && descendingFileNames,
+                                                       usesSelection: embedded)
                                     .id(source.id)
                                 if !embedded {
                                     DisclosureGroup("共享设置") { savedPage(source).padding(.top, 12) }
@@ -328,6 +346,9 @@ struct SourcesView: View {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
             return FileNameOrder.compare($0.name, $1.name, descending: embedded && descendingFileNames)
         }
+        let artwork = (embedded && !filesInList && !visibleEntries.isEmpty)
+            ? FileDirectoryArtwork.index(groups: library.groupedItems, directories: indexedSMBPaths())
+            : [:]
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 if !embedded, let smbParent {
@@ -381,14 +402,19 @@ struct SourcesView: View {
                     ForEach(visibleEntries) { entry in
                         if entry.isDirectory {
                             FileBrowserCard(title: entry.name, icon: "folder",
-                                            favorite: store.smbFolder(at: entry.url)?.isMediaSource == true) {
-                                browseSMB(entry.url)
-                            }.contextMenu { folderBookmarkAction(entry.url) }
-                        } else {
-                            FileBrowserCard(title: entry.name, icon: "play.rectangle", video: true) {
-                                playSMB(entry)
+                                            favorite: store.smbFolder(at: entry.url)?.isMediaSource == true,
+                                            activation: smbActivation(for: entry), portrait: true, artwork: artwork[entry.name]) {
+                                selectSMBEntry(entry)
                             }.contextMenu {
-                                Button("播放") { playSMB(entry) }
+                                Button("打开") { openSMBEntry(entry) }
+                                folderBookmarkAction(entry.url)
+                            }
+                        } else {
+                            FileBrowserCard(title: entry.name, icon: "play.rectangle", video: true, activation: smbActivation(for: entry),
+                                            portrait: true, artwork: artwork[entry.name]) {
+                                selectSMBEntry(entry)
+                            }.contextMenu {
+                                Button("播放") { openSMBEntry(entry) }
                                 Button("下载") { downloadSMB(entry) }
                             }.disabled(preparingPlayback)
                         }
@@ -409,11 +435,16 @@ struct SourcesView: View {
 
     private func smbFolderRow(_ folder: FileDirectoryEntry) -> some View {
         HStack(spacing: 0) {
-            FileBrowserRow(title: folder.name, icon: "folder", opensFolder: true, action: { browseSMB(folder.url) })
+            FileBrowserRow(title: folder.name, icon: "folder", opensFolder: true,
+                           action: { if embedded { selectSMBEntry(folder) } else { browseSMB(folder.url) } },
+                           activation: embedded ? smbActivation(for: folder) : nil)
                 .disabled(smbLoading)
             if !embedded { folderStar(folder.url, name: folder.name) }
         }.contextMenu {
-            if embedded { folderBookmarkAction(folder.url) }
+            if embedded {
+                Button("打开") { openSMBEntry(folder) }
+                folderBookmarkAction(folder.url)
+            }
         }
     }
 
@@ -424,9 +455,30 @@ struct SourcesView: View {
     }
 
     private func smbVideoRow(_ entry: FileDirectoryEntry) -> some View {
-        FileVideoRow(title: entry.name, media: nil, action: { playSMB(entry) },
-                     download: smbConnection == nil ? nil : { downloadSMB(entry) })
+        FileVideoRow(title: entry.name, media: nil, action: { openSMBEntry(entry) },
+                     download: smbConnection == nil ? nil : { downloadSMB(entry) },
+                     select: embedded ? { selectSMBEntry(entry) } : nil,
+                     selected: embedded && isSMBEntrySelected(entry))
             .disabled(smbLoading || preparingPlayback)
+    }
+
+    private func smbActivation(for entry: FileDirectoryEntry) -> FileItemActivation {
+        FileItemActivation(isSelected: isSMBEntrySelected(entry)) { openSMBEntry(entry) }
+    }
+
+    private func isSMBEntrySelected(_ entry: FileDirectoryEntry) -> Bool {
+        smbDirectoryKey.flatMap { selectedSMBEntries[$0] } == entry.name
+    }
+
+    private func selectSMBEntry(_ entry: FileDirectoryEntry) {
+        if let smbDirectoryKey { selectedSMBEntries[smbDirectoryKey] = entry.name }
+    }
+
+    private func openSMBEntry(_ entry: FileDirectoryEntry) {
+        guard !smbLoading, !preparingPlayback else { return }
+        if embedded { selectSMBEntry(entry) }
+        if entry.isDirectory { browseSMB(entry.url) }
+        else { playSMB(entry) }
     }
 
     private func folderStar(_ url: URL, name: String) -> some View {
@@ -543,7 +595,7 @@ struct SourcesView: View {
     private func reset() {
         smbTask?.cancel(); smbTask = nil; smbLoading = false
         playbackTask?.cancel(); playbackTask = nil; preparingPlayback = false
-        smbURL = nil; smbRequestedURL = nil; smbFolders = []; smbConnection = nil; smbCredentials = nil
+        smbURL = nil; smbRequestedURL = nil; smbFolders = []; selectedSMBEntries = [:]; smbConnection = nil; smbCredentials = nil
         name = ""; address = ""; username = ""; password = ""; token = ""; userID = ""
         originalCredentials = nil; editing = nil; inputError = nil; addressFocused = false
         editGeneration = UUID(); loadingCredentials = false
@@ -593,6 +645,11 @@ struct SourcesView: View {
     }
 
     private func browseSMB(_ url: URL, reading source: LibrarySource? = nil, savingConnection: Bool = false) {
+        if preparingPlayback {
+            playbackTask?.cancel()
+            playbackTask = nil
+            preparingPlayback = false
+        }
         smbTask?.cancel()
         smbLoading = true; inputError = nil; smbRequestedURL = url
         let currentCredentials = savingConnection ? SourceCredentials(username: username, password: password) : smbCredentials
@@ -714,25 +771,9 @@ struct SourcesView: View {
         downloads.start(name: media.title, key: media.url) { try await RemoteSourceResolver.resolve(media) }
     }
 
-    private func smbIndexedMedia(_ entry: FileDirectoryEntry) -> Media? {
-        let server = SMBClient.serverURL(entry.url)
-        let components = SMBClient.pathComponents(entry.url)
-        let sources = store.starredSMBFolders.filter { SMBClient.serverURL($0.url) == server }
-        var paths: [UUID: String] = [:]
-        for source in sources {
-            let prefix = SMBClient.pathComponents(source.url)
-            if prefix.count < components.count, components.starts(with: prefix) {
-                paths[source.id] = components.dropFirst(prefix.count).joined(separator: "/")
-            }
-        }
-        return library.items.first { item in
-            item.sourceMissing != true && item.sourceID.flatMap { paths[$0] } == item.sourcePath
-        }
-    }
-
     private func playSMB(_ entry: FileDirectoryEntry) {
         guard let source = smbConnection else { return }
-        if let media = smbIndexedMedia(entry) { openMedia(media); return }
+        if let media = indexedSMBDirectory()[entry.name] { openMedia(media); return }
         preparingPlayback = true
         inputError = nil
         playbackTask = Task {
@@ -740,7 +781,7 @@ struct SourcesView: View {
             do {
                 let url = try await RemoteSources.shared.browsedSMBURL(entry.url, connection: source)
                 try Task.checkCancellation()
-                openMedia(Media(url: url, title: entry.name))
+                openMedia(Media(url: url, title: entry.name, directPlaybackURL: SMBClient.playbackHistoryURL(entry.url)))
             } catch is CancellationError {} catch {
                 if !Task.isCancelled { inputError = error.localizedDescription }
             }
@@ -752,6 +793,60 @@ struct SourcesView: View {
         downloads.start(name: entry.name, key: entry.url) {
             try await RemoteSources.shared.browsedSMBURL(entry.url, connection: source)
         }
+    }
+
+    private func playSMBDirectory(shuffled: Bool = false, loop: Bool = false) {
+        guard let source = smbConnection, let playQueue, !smbLoading, !preparingPlayback else { return }
+        let entries = smbFolders.filter { !$0.isDirectory }.sorted {
+            FileNameOrder.compare($0.name, $1.name, descending: descendingFileNames)
+        }
+        guard !entries.isEmpty else { return }
+        preparingPlayback = true
+        inputError = nil
+        playbackTask = Task {
+            defer { if !Task.isCancelled { preparingPlayback = false } }
+            do {
+                let indexed = indexedSMBDirectory()
+                var items: [Media] = []
+                for entry in entries {
+                    try Task.checkCancellation()
+                    if let media = indexed[entry.name] { items.append(media) }
+                    else {
+                        let url = try await RemoteSources.shared.browsedSMBURL(entry.url, connection: source)
+                        items.append(Media(url: url, title: entry.name, directPlaybackURL: SMBClient.playbackHistoryURL(entry.url)))
+                    }
+                }
+                try Task.checkCancellation()
+                playQueue(items, shuffled, loop)
+            } catch is CancellationError {} catch {
+                if !Task.isCancelled { inputError = error.localizedDescription }
+            }
+        }
+    }
+
+    private func indexedSMBPaths() -> [UUID: [Substring]] {
+        guard let smbURL, let connection = smbConnection else { return [:] }
+        let server = SMBClient.serverURL(connection.url)
+        let directory = SMBClient.pathComponents(smbURL)
+        var paths: [UUID: [Substring]] = [:]
+        for source in store.starredSMBFolders where SMBClient.serverURL(source.url) == server {
+            let root = SMBClient.pathComponents(source.url)
+            if directory.starts(with: root) {
+                paths[source.id] = Array(directory.dropFirst(root.count))
+            }
+        }
+        return paths
+    }
+
+    private func indexedSMBDirectory() -> [String: Media] {
+        let paths = indexedSMBPaths().mapValues { $0.isEmpty ? "" : $0.joined(separator: "/") + "/" }
+        return Dictionary(library.items.compactMap { item -> (String, Media)? in
+            guard item.sourceMissing != true, let prefix = item.sourceID.flatMap({ paths[$0] }),
+                  item.sourcePath.hasPrefix(prefix) else { return nil }
+            let filename = item.sourcePath.dropFirst(prefix.count)
+            guard !filename.contains("/") else { return nil }
+            return (String(filename), item)
+        }, uniquingKeysWith: { first, _ in first })
     }
     private func chooseKnownHosts() {
         let panel = NSOpenPanel(); panel.showsHiddenFiles = true; panel.allowsMultipleSelection = false

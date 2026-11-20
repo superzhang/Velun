@@ -3,6 +3,66 @@ import Foundation
 import Testing
 @testable import Luma
 
+@Test func fileGridOnlyUsesArtworkForAnUnambiguousFolderOrVideo() throws {
+    let source = UUID()
+    let otherSource = UUID()
+    let online = try #require(URL(string: "https://image.tmdb.org/t/p/w500/fixture.jpg"))
+    let local = URL(filePath: "/tmp/FixturePoster.jpg")
+    let show = MovieInfo(id: 10, kind: "tv", title: "示例剧集", year: "2026", overview: "", poster: online)
+    let film = MovieInfo(id: 11, kind: "movie", title: "示例电影", year: "2025", overview: "", poster: online)
+    func media(_ path: String, sourceID: UUID = source, info: MovieInfo, poster: URL? = nil) -> Media {
+        Media(url: RemoteSources.virtualURL(source: sourceID, path: path), title: path, metadata: info,
+              sourceID: sourceID, relativePath: path, sidecars: poster.map { MediaSidecars(poster: $0) })
+    }
+    let items = [
+        media("大陆/单剧目录/示例剧集.S02E01.mkv", info: show, poster: local),
+        media("大陆/单剧目录/示例剧集.S02E02.mkv", info: show),
+        media("大陆/分类目录/示例剧集.S02E01.mkv", info: show),
+        media("大陆/分类目录/示例电影.mkv", info: film),
+        media("大陆/影片.mkv", info: film),
+        media("大陆/同名空目录/示例电影.mkv", sourceID: otherSource, info: film)
+    ]
+    let index = FileDirectoryArtwork.index(groups: MediaGroup.make(items), directories: [source: ["大陆"]])
+    let series = try #require(index["单剧目录"])
+    #expect(series.title == "示例剧集")
+    #expect(series.subtitle == "第 2 季")
+    #expect(series.poster == local)
+    #expect(series.fallback == online)
+    #expect(index["影片.mkv"]?.title == "示例电影")
+    #expect(index["分类目录"] == nil)
+    #expect(index["同名空目录"] == nil)
+}
+
+@Test func episodeCanUsePosterInParentSeriesFolder() throws {
+    let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let season = root.appending(component: "Season 01")
+    try FileManager.default.createDirectory(at: season, withIntermediateDirectories: true)
+    try Data().write(to: root.appending(component: "tvshow.nfo"))
+    let poster = root.appending(component: "poster.jpg")
+    let marker = Data("series artwork fixture".utf8)
+    try marker.write(to: poster)
+    try Data().write(to: season.appending(component: "Fixture.S01E01.mkv"))
+    let scan = try SourceWorker.scanDirectory(root)
+    let artwork = try #require(scan.files.first?.sidecars?.poster)
+    #expect(artwork.lastPathComponent == "poster.jpg")
+    #expect(try Data(contentsOf: artwork) == marker)
+}
+
+@Test func folderWithItsOwnSeriesNFODoesNotInheritAnotherShowsPoster() throws {
+    let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let child = root.appending(component: "Different Show")
+    try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+    try Data().write(to: root.appending(component: "tvshow.nfo"))
+    try Data().write(to: root.appending(component: "poster.jpg"))
+    try Data().write(to: child.appending(component: "tvshow.nfo"))
+    try Data().write(to: child.appending(component: "Fixture.S01E01.mkv"))
+    let video = try #require(SourceWorker.scanDirectory(root).files.first)
+    #expect(video.nfo?.show?.deletingLastPathComponent().lastPathComponent == child.lastPathComponent)
+    #expect(video.sidecars?.poster == nil)
+}
+
 @Test func scanFindsArtworkAndSubtitlesInTheSameDirectory() throws {
     let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -31,17 +91,19 @@ import Testing
     let library = Library(file: storage)
     let source = UUID()
     let video = ScannedFile(url: folder.appending(component: "Movie #1.mkv"), relativePath: "Movie #1.mkv", localFile: false)
-    library.importSource(source, files: [video], complete: true)
+    #expect(library.importSource(source, files: [video], complete: true).added == 1)
     let first = try #require(library.items.first)
     library.setWatched([first.id], to: true)
     let before = library.structureRevision
-    library.importSource(source, files: [], complete: false)
+    #expect(!library.importSource(source, files: [video], complete: true).hasChanges)
+    #expect(!library.importSource(source, files: [], complete: false).hasChanges)
     #expect(library.items.first?.sourceMissing == nil)
     #expect(library.structureRevision == before)
-    library.importSource(source, files: [], complete: true)
+    #expect(library.importSource(source, files: [], complete: true).missing == 1)
+    #expect(!library.importSource(source, files: [], complete: true).hasChanges)
     #expect(Library(file: storage).items.first?.sourceMissing == true)
     let newMount = ScannedFile(url: folder.appending(path: "another mount/Movie #1.mkv"), relativePath: video.relativePath, localFile: false)
-    library.importSource(source, files: [newMount], complete: true)
+    #expect(library.importSource(source, files: [newMount], complete: true).updated == 1)
     #expect(library.items.count == 1)
     #expect(library.items.first?.id == first.id)
     #expect(library.items.first?.sourceMissing == nil)

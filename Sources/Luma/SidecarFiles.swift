@@ -109,6 +109,12 @@ struct SidecarIndex {
             let stem = video.deletingPathExtension().lastPathComponent.lowercased()
             let parent = directory.deletingLastPathComponent()
             let show = index?.nfo["tvshow"] ?? indices[parent]?.nfo["tvshow"]
+            if index?.nfo["tvshow"] == nil, indices[parent]?.nfo["tvshow"] != nil, files[i].sidecars?.poster == nil,
+               let poster = indices[parent]?.image(named: ["poster", "folder"]) {
+                var sidecars = files[i].sidecars ?? MediaSidecars()
+                sidecars.poster = poster
+                files[i].sidecars = sidecars
+            }
             let direct = index?.nfo[stem] ?? (index?.videoCount == 1 ? index?.nfo["movie"] : nil)
             if direct != nil || show != nil { files[i].nfo = NFOCandidates(video: direct, show: show) }
         }

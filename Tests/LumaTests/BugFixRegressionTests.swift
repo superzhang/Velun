@@ -194,8 +194,17 @@ func rescanKeepsPlayingBridgeAndConnectionRevisionsCoexist() async throws {
     var source = LibrarySource(name: "NAS", url: URL(string: "smb://fixture/Movies")!, connectionKind: .smb, directSMB: true)
     var media = Media(url: RemoteSources.virtualURL(source: source.id, path: "Show.S01E01.mkv"), title: "Show")
     media.sourceID = source.id
+    media.fileVersion = MediaFileVersion(size: 400, modified: "first")
     try JSONEncoder().encode([source]).write(to: file)
     let first = await AutoSkipCache.key(media: media, reference: media, confirmation: media, duration: 1200, sourcesFile: file)
+    source.lastScan = Date()
+    try JSONEncoder().encode([source]).write(to: file)
+    let refreshed = await AutoSkipCache.key(media: media, reference: media, confirmation: media, duration: 1200, sourcesFile: file)
+    #expect(first == refreshed)
+    var replacement = media
+    replacement.fileVersion = MediaFileVersion(size: 400, modified: "second")
+    let modified = await AutoSkipCache.key(media: media, reference: replacement, confirmation: media, duration: 1200, sourcesFile: file)
+    #expect(first != modified)
     source.connectionRevision = UUID()
     try JSONEncoder().encode([source]).write(to: file)
     let changed = await AutoSkipCache.key(media: media, reference: media, confirmation: media, duration: 1200, sourcesFile: file)

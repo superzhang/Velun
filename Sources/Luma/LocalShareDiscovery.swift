@@ -2,6 +2,12 @@ import Foundation
 import Observation
 import Darwin
 
+struct MountedSMBEndpoint: Sendable, Equatable {
+    let host: String
+    let port: Int
+    let addresses: [String]
+}
+
 struct DiscoveredShare: Identifiable, Sendable, Equatable {
     let name: String
     let kind: SourceKind
@@ -9,6 +15,7 @@ struct DiscoveredShare: Identifiable, Sendable, Equatable {
     var mountedURL: URL? = nil
     var alternateHosts: [String] = []
     var serverID: String? = nil
+    var mountedSMBEndpoint: MountedSMBEndpoint? = nil
     var id: String {
         if let serverID, !serverID.isEmpty { return kind.rawValue + ":server:" + serverID }
         var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)!
@@ -170,23 +177,57 @@ enum MountedShareScanner {
     static func directory(for source: URL, on share: DiscoveredShare) -> URL? {
         let defaults = ["smb": 445, "nfs": 2049]
         guard let volume = share.mountedURL, let scheme = source.scheme, scheme == share.url.scheme,
-              let host = source.host?.lowercased(), host == share.url.host?.lowercased(),
-              (source.port ?? defaults[scheme]) == (share.url.port ?? defaults[scheme]) else { return nil }
+              let host = source.host.map(normalizedHost) else { return nil }
+        let sameHost = host == share.url.host.map(normalizedHost)
+        let port = source.port ?? (sameHost ? share.mountedSMBEndpoint?.port : nil) ?? defaults[scheme]
+        let mountedPort = share.url.port ?? share.mountedSMBEndpoint?.port ?? defaults[scheme]
+        let direct = sameHost && port == mountedPort
+        let resolved = share.mountedSMBEndpoint.map {
+            scheme == "smb" && port == mountedPort && ([$0.host] + $0.addresses).map(normalizedHost).contains(host)
+        } ?? false
+        guard direct || resolved else { return nil }
         let prefix = share.url.pathComponents.filter { $0 != "/" }
         let sourcePath = source.pathComponents.filter { $0 != "/" }
         guard sourcePath.starts(with: prefix) else { return nil }
         return sourcePath.dropFirst(prefix.count).reduce(volume) { $0.appending(component: $1) }
     }
 
+    private static func normalizedHost(_ host: String) -> String {
+        host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    }
 
     @concurrent static func scan() async -> [DiscoveredShare] {
         let keys: Set<URLResourceKey> = [.volumeURLForRemountingKey, .volumeNameKey, .volumeIsLocalKey]
         let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes]) ?? []
-        return volumes.compactMap { volume in
+        let shares = volumes.compactMap { volume -> DiscoveredShare? in
             guard let values = try? volume.resourceValues(forKeys: keys), let remount = values.volumeURLForRemounting,
                   let share = discovered(volume: volume, remount: remount, name: values.volumeName ?? volume.lastPathComponent) else { return nil }
             return share
         }
+        let serviceNames = Set(shares.compactMap { share in
+            share.kind == .smb ? share.url.host.flatMap(smbServiceName) : nil
+        })
+        let endpoints = await withTaskGroup(of: (String, MountedSMBEndpoint?).self) { group in
+            for name in serviceNames {
+                group.addTask { (name, await MountedSMBResolver.resolve(name)) }
+            }
+            var resolved: [String: MountedSMBEndpoint] = [:]
+            for await (name, endpoint) in group { resolved[name] = endpoint }
+            return resolved
+        }
+        return shares.map { share in
+            guard share.kind == .smb, let name = share.url.host.flatMap(smbServiceName) else { return share }
+            var resolved = share
+            resolved.mountedSMBEndpoint = endpoints[name]
+            return resolved
+        }
+    }
+
+    static func smbServiceName(_ host: String) -> String? {
+        let trimmed = host.hasSuffix(".") ? String(host.dropLast()) : host
+        let suffix = "._smb._tcp.local"
+        guard trimmed.lowercased().hasSuffix(suffix), trimmed.count > suffix.count else { return nil }
+        return String(trimmed.dropLast(suffix.count))
     }
     static func discovered(volume: URL, remount: URL, name: String) -> DiscoveredShare? {
         let kind: SourceKind
@@ -203,6 +244,40 @@ enum MountedShareScanner {
         if parts.scheme == "webdavs" { parts.scheme = "https" }
         guard let clean = parts.url else { return nil }
         return DiscoveredShare(name: name, kind: kind, url: clean, mountedURL: volume)
+    }
+}
+
+@MainActor private final class MountedSMBResolver: NSObject, @preconcurrency NetServiceDelegate {
+    private let service: NetService
+    private var continuation: CheckedContinuation<MountedSMBEndpoint?, Never>?
+
+    private init(name: String) {
+        service = NetService(domain: "local.", type: "_smb._tcp.", name: name)
+    }
+
+    static func resolve(_ name: String) async -> MountedSMBEndpoint? {
+        guard !Task.isCancelled else { return nil }
+        let resolver = Self(name: name)
+        defer { resolver.service.delegate = nil; resolver.service.stop() }
+        return await withCheckedContinuation { continuation in
+            resolver.continuation = continuation
+            resolver.service.delegate = resolver
+            resolver.service.resolve(withTimeout: 1.5)
+        }
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let host = sender.hostName, (1...65535).contains(sender.port) else { finish(nil); return }
+        finish(MountedSMBEndpoint(host: host, port: sender.port,
+                                  addresses: DiscoveredShare.numericHosts(sender.addresses ?? [])))
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) { finish(nil) }
+
+    private func finish(_ result: MountedSMBEndpoint?) {
+        let waiting = continuation
+        continuation = nil
+        waiting?.resume(returning: result)
     }
 }
 

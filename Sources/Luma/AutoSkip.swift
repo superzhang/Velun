@@ -185,16 +185,18 @@ enum AutoSkip {
 actor AutoSkipCache {
     private struct Record: Codable { let key: String; let date: Date; let result: SkipDetection }
     @concurrent static func key(media: Media, reference: Media, confirmation: Media, duration: Double, sourcesFile: URL = URL.applicationSupportDirectory.appending(path: "Luma/sources.json")) async -> String {
-        var sourceTags: [UUID: String] = [:]
+        var records: [UUID: LibrarySource] = [:]
         if let data = try? Data(contentsOf: sourcesFile), let sources = try? JSONDecoder().decode([LibrarySource].self, from: data) {
-            for source in sources { sourceTags[source.id] = "\(source.url.absoluteString)|\(source.connectionRevision?.uuidString ?? "legacy")|\(source.lastScan?.timeIntervalSince1970 ?? 0)" }
+            for source in sources { records[source.id] = source }
         }
         func identity(_ item: Media) -> String {
-            let source = item.sourceID.flatMap { sourceTags[$0] } ?? ""
-            let resource = try? item.url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            return "\(item.url.absoluteString)|\(resource?.fileSize ?? 0)|\(resource?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(source)"
+            let source = item.sourceID.flatMap { records[$0] }
+            let version = item.url.isFileURL ? MediaFileVersion.local(item.url) : item.fileVersion
+            let fingerprint = version.map { "\($0.size)|\($0.modified)" }
+                ?? "scan:\(source?.lastScan?.timeIntervalSince1970 ?? 0)"
+            return "\(item.url.absoluteString)|\(source?.url.absoluteString ?? "")|\(source?.connectionRevision?.uuidString ?? "legacy")|\(fingerprint)"
         }
-        return "v3|\(identity(media))|\(identity(reference))|\(identity(confirmation))|\(Int(duration))"
+        return "v4|\(identity(media))|\(identity(reference))|\(identity(confirmation))|\(Int(duration))"
     }
     private static func file(_ id: UUID) -> URL { URL.applicationSupportDirectory.appending(path: "Luma/skip-markers-v1/\(id.uuidString).json") }
     @concurrent static func read(id: UUID, key: String) async -> SkipDetection? {

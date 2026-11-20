@@ -39,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Velun</string>
 <key>CFBundleDisplayName</key><string>Velun</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.23.7</string>
-<key>CFBundleVersion</key><string>42</string>
+<key>CFBundleShortVersionString</key><string>0.23.15</string>
+<key>CFBundleVersion</key><string>50</string>
 <key>LSMinimumSystemVersion</key><string>27.2</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>

@@ -28,6 +28,19 @@ struct NFOCandidates: Sendable {
     var show: URL?
 }
 
+struct MediaFileVersion: Codable, Equatable, Sendable {
+    let size: Int64
+    let modified: String
+
+    static func local(_ url: URL) -> Self? {
+        var url = url
+        url.removeAllCachedResourceValues()
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize, let modified = values.contentModificationDate else { return nil }
+        return Self(size: Int64(size), modified: String(modified.timeIntervalSinceReferenceDate))
+    }
+}
+
 enum NFOReader {
     private static let byteLimit = 512 * 1024
     private enum Outcome: Sendable {
@@ -44,27 +57,70 @@ enum NFOReader {
         }
     }
 
+    struct Cache: Sendable {
+        fileprivate struct Entry: Sendable {
+            let version: MediaFileVersion
+            let record: NFORecord?
+        }
+        fileprivate var entries: [URL: Entry] = [:]
+
+        func hasVersion(of url: URL, version: MediaFileVersion?) -> Bool {
+            matchingEntry(for: url, version: version) != nil
+        }
+
+        fileprivate func matchingEntry(for url: URL, version: MediaFileVersion?) -> Entry? {
+            guard let entry = entries[url], entry.version == version else { return nil }
+            return entry
+        }
+    }
+
     @concurrent static func enrich(
         _ input: [ScannedFile],
         resolve: @escaping @Sendable (URL) async throws -> URL = { $0 }
     ) async throws -> [ScannedFile] {
+        try await enrich(input, previous: Cache(), versions: [:], resolve: resolve).files
+    }
+
+    @concurrent static func enrich(
+        _ input: [ScannedFile],
+        previous: Cache,
+        versions: [URL: MediaFileVersion]? = nil,
+        resolve: @escaping @Sendable (URL) async throws -> URL = { $0 }
+    ) async throws -> (files: [ScannedFile], cache: Cache) {
         let urls = Array(Set(input.flatMap { [$0.nfo?.video, $0.nfo?.show].compactMap { $0 } }))
-        guard !urls.isEmpty else { return input }
+        guard !urls.isEmpty else { return (input, Cache()) }
         var outcomes: [URL: Outcome] = [:]
-        for start in stride(from: 0, to: urls.count, by: 8) {
+        var current = Cache()
+        var pending: [(url: URL, version: MediaFileVersion?)] = []
+        for url in urls {
             try Task.checkCancellation()
-            await withTaskGroup(of: (URL, Outcome).self) { group in
-                for url in urls[start..<min(start + 8, urls.count)] {
+            let version = if let versions { versions[url] } else { MediaFileVersion.local(url) }
+            if let cached = previous.matchingEntry(for: url, version: version) {
+                outcomes[url] = .parsed(cached.record)
+                current.entries[url] = cached
+            } else {
+                pending.append((url, version))
+            }
+        }
+        for start in stride(from: 0, to: pending.count, by: 8) {
+            try Task.checkCancellation()
+            await withTaskGroup(of: (URL, MediaFileVersion?, Outcome).self) { group in
+                for (url, version) in pending[start..<min(start + 8, pending.count)] {
                     group.addTask {
-                        do { return (url, .parsed(try await read(try await resolve(url)))) }
-                        catch { return (url, .unreadable) }
+                        do { return (url, version, .parsed(try await read(try await resolve(url)))) }
+                        catch { return (url, version, .unreadable) }
                     }
                 }
-                for await (url, outcome) in group { outcomes[url] = outcome }
+                for await (url, version, outcome) in group {
+                    outcomes[url] = outcome
+                    if let version, case .parsed(let record) = outcome {
+                        current.entries[url] = Cache.Entry(version: version, record: record)
+                    }
+                }
             }
         }
         try Task.checkCancellation()
-        return input.map { original in
+        let files = input.map { original in
             guard let candidates = original.nfo else { return original }
             var file = original
             let video = candidates.video.flatMap { outcomes[$0] }
@@ -81,6 +137,7 @@ enum NFOReader {
             }
             return file
         }
+        return (files, current)
     }
 
     private static func read(_ url: URL) async throws -> NFORecord? {

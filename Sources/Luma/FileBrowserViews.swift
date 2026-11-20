@@ -8,6 +8,7 @@ struct FileBrowserRow: View {
     var watched = false
     var opensFolder = false
     var action: (() -> Void)?
+    var activation: FileItemActivation?
     @State private var hovered = false
 
     var body: some View {
@@ -19,6 +20,7 @@ struct FileBrowserRow: View {
                     .background(LumaTheme.ink.opacity(hovered ? 0.065 : 0))
                     .onHover { hovered = $0 }
                     .help(title)
+                    .modifier(activation ?? FileItemActivation())
             } else {
                 label
             }
@@ -46,6 +48,7 @@ struct FileBrowserRow: View {
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+        .background(LumaTheme.ink.opacity(activation?.isSelected == true ? 0.14 : 0))
         .contentShape(Rectangle())
     }
 }
@@ -110,10 +113,13 @@ struct FileVideoRow: View {
     let media: Media?
     let action: () -> Void
     var download: (() -> Void)?
+    var select: (() -> Void)?
+    var selected = false
 
     var body: some View {
         HStack(spacing: 8) {
-            FileBrowserRow(title: title, icon: "play.rectangle", watched: media?.isWatched == true, action: action)
+            FileBrowserRow(title: title, icon: "play.rectangle", watched: media?.isWatched == true,
+                           action: select ?? action, activation: select.map { _ in FileItemActivation(isSelected: selected, open: action) })
             if let download {
                 Menu {
                     Button("播放", action: action)
@@ -126,6 +132,26 @@ struct FileVideoRow: View {
     }
 }
 
+struct FileItemActivation: ViewModifier {
+    var isSelected = false
+    var open: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let open {
+            content
+                .simultaneousGesture(TapGesture(count: 2).onEnded { open() })
+                .onKeyPress(.return) {
+                    open()
+                    return .handled
+                }
+                .accessibilityAction(named: Text("打开"), open)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+        } else {
+            content
+        }
+    }
+}
+
 struct SavedSourceFileBrowser: View {
     let source: LibrarySource
     let library: Library
@@ -134,6 +160,7 @@ struct SavedSourceFileBrowser: View {
     let download: (Media) -> Void
     var listMode = true
     var descendingNames = false
+    var usesSelection = false
     @State private var path = ""
     @State private var refresh = 0
     @State private var location: URL?
@@ -141,6 +168,7 @@ struct SavedSourceFileBrowser: View {
     @State private var listedPath: String?
     @State private var loading = true
     @State private var error: String?
+    @State private var selectedEntries: [String: URL] = [:]
 
     private var usesIndex: Bool { !source.isFileShare }
     private var indexedItems: [String: Media] {
@@ -150,6 +178,7 @@ struct SavedSourceFileBrowser: View {
 
     var body: some View {
         let indexed = indexedItems
+        let artwork = listMode ? [:] : FileDirectoryArtwork.index(groups: library.groupedItems, directories: [source.id: path.split(separator: "/")])
         let visible = (usesIndex ? indexedEntries(indexed) : listedPath == path ? entries : []).filter {
             filter.isEmpty || $0.name.localizedStandardContains(filter)
         }.sorted {
@@ -182,11 +211,16 @@ struct SavedSourceFileBrowser: View {
                         ForEach(visible) { entry in
                             let relative = path.isEmpty ? entry.name : path + "/" + entry.name
                             if entry.isDirectory {
-                                FileBrowserRow(title: entry.name, icon: "folder", opensFolder: true, action: { path = relative })
+                                FileBrowserRow(title: entry.name, icon: "folder", opensFolder: true,
+                                               action: click(entry, open: { path = relative }),
+                                               activation: activation(entry, open: { path = relative }))
+                                    .contextMenu { Button("打开") { path = relative } }
                             } else {
                                 let item = media(entry, relative: relative, indexed: indexed[relative])
                                 FileVideoRow(title: entry.name, media: item, action: { play(item) },
-                                             download: OfflineDownloads.supports(item.url) ? { download(item) } : nil)
+                                             download: OfflineDownloads.supports(item.url) ? { download(item) } : nil,
+                                             select: usesSelection ? { selectedEntries[path] = entry.url } : nil,
+                                             selected: selectedEntries[path] == entry.url)
                             }
                             Divider().padding(.leading, 16)
                         }
@@ -197,10 +231,17 @@ struct SavedSourceFileBrowser: View {
                         ForEach(visible) { entry in
                             let relative = path.isEmpty ? entry.name : path + "/" + entry.name
                             if entry.isDirectory {
-                                FileBrowserCard(title: entry.name, icon: "folder") { path = relative }
+                                FileBrowserCard(title: entry.name, icon: "folder",
+                                                activation: activation(entry, open: { path = relative }) ?? FileItemActivation(),
+                                                portrait: true, artwork: artwork[entry.name],
+                                                action: click(entry, open: { path = relative }))
+                                    .contextMenu { Button("打开") { path = relative } }
                             } else {
                                 let item = media(entry, relative: relative, indexed: indexed[relative])
-                                FileBrowserCard(title: entry.name, icon: "play.rectangle", video: true) { play(item) }
+                                FileBrowserCard(title: entry.name, icon: "play.rectangle", video: true,
+                                                activation: activation(entry, open: { play(item) }) ?? FileItemActivation(),
+                                                portrait: true, artwork: artwork[entry.name],
+                                                action: click(entry, open: { play(item) }))
                                     .contextMenu {
                                         Button("播放") { play(item) }
                                         if OfflineDownloads.supports(item.url) { Button("下载") { download(item) } }
@@ -212,6 +253,18 @@ struct SavedSourceFileBrowser: View {
             }.disabled(loading && !usesIndex)
         }
         .task(id: Listing(path: path, refresh: refresh, revision: source.connectionRevision)) { await load() }
+    }
+
+    private func click(_ entry: FileDirectoryEntry, open: @escaping () -> Void) -> () -> Void {
+        usesSelection ? { selectedEntries[path] = entry.url } : open
+    }
+
+    private func activation(_ entry: FileDirectoryEntry, open: @escaping () -> Void) -> FileItemActivation? {
+        guard usesSelection else { return nil }
+        return FileItemActivation(isSelected: selectedEntries[path] == entry.url) {
+            selectedEntries[path] = entry.url
+            open()
+        }
     }
 
     private struct Listing: Hashable {
@@ -323,34 +376,84 @@ struct FileBrowserCard: View {
     let icon: String
     var favorite = false
     var video = false
+    var activation = FileItemActivation()
+    var portrait = false
+    var artwork: FileDirectoryArtwork?
     let action: () -> Void
+    @State private var artworkHovered = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Image(systemName: icon)
-                        .font(.system(size: 32, weight: .light))
-                        .foregroundStyle(video ? Color.secondary : LumaTheme.navigationAccent)
-                    Spacer(minLength: 0)
-                    if favorite {
-                        Image(systemName: "star.fill").font(.system(size: 13))
-                            .foregroundStyle(LumaTheme.navigationAccent)
-                    }
-                }.accessibilityHidden(true)
-                Text(title)
-                    .font(.callout.weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        Group {
+            if portrait {
+                Button(action: action) { portraitContent }
+                    .buttonStyle(.plain)
+            } else {
+                Button(action: action) { compactContent }
+                    .buttonStyle(SidebarButtonStyle())
+                    .help(title)
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
-            .background(LumaTheme.surface, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(LumaTheme.ink.opacity(0.08)))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(SidebarButtonStyle())
-        .help(title)
+        .modifier(activation)
+    }
+
+    private var portraitContent: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(LumaTheme.surface)
+                .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                .overlay {
+                    if let artwork {
+                        PosterView(url: artwork.poster, fallbackURL: artwork.fallback, placeholderSymbol: icon)
+                    } else {
+                        Image(systemName: icon)
+                            .font(.system(size: 39, weight: .light))
+                            .foregroundStyle(video ? Color.secondary : LumaTheme.navigationAccent)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(activation.isSelected ? LumaTheme.navigationAccent : LumaTheme.ink.opacity(artworkHovered ? 0.22 : 0.08),
+                                      lineWidth: activation.isSelected ? 2 : 1)
+                        .allowsHitTesting(false)
+                }
+                .onHover { artworkHovered = $0 }
+                .accessibilityHidden(true)
+            Text(artwork?.title ?? title)
+                .font(.callout.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+                .help(title)
+            Text(artwork?.subtitle ?? " ")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                .accessibilityHidden(artwork?.subtitle == nil)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+    }
+
+    private var compactContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(video ? Color.secondary : LumaTheme.navigationAccent)
+                Spacer(minLength: 0)
+                if favorite {
+                    Image(systemName: "star.fill").font(.system(size: 13))
+                        .foregroundStyle(LumaTheme.navigationAccent)
+                }
+            }.accessibilityHidden(true)
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 116, alignment: .leading)
+        .background(activation.isSelected ? LumaTheme.navigationAccent.opacity(0.12) : LumaTheme.surface,
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder(activation.isSelected ? LumaTheme.navigationAccent : LumaTheme.ink.opacity(0.08))
+            .allowsHitTesting(false))
+        .contentShape(Rectangle())
     }
 }
 
@@ -359,6 +462,7 @@ struct FileFavoritesPage: View {
     let filter: String
     let listMode: Bool
     let descendingNames: Bool
+    @Binding var selectedFolderID: UUID?
     let open: (LibrarySource) -> Void
     let addSource: () -> Void
 
@@ -380,7 +484,10 @@ struct FileFavoritesPage: View {
                 if listMode {
                     LazyVStack(spacing: 0) {
                         ForEach(visible) { folder in
-                            FileBrowserRow(title: folder.url.lastPathComponent, icon: "star", opensFolder: true) { open(folder) }
+                            let item = activation(for: folder)
+                            FileBrowserRow(title: folder.url.lastPathComponent, icon: "star", opensFolder: true,
+                                           action: { selectedFolderID = folder.id }, activation: item)
+                                .contextMenu { Button("打开") { open(folder) } }
                             Divider().padding(.leading, 16)
                         }
                     }
@@ -390,11 +497,17 @@ struct FileFavoritesPage: View {
                 } else {
                     FileBrowserGrid {
                         ForEach(visible) { folder in
-                            FileBrowserCard(title: folder.url.lastPathComponent, icon: "folder", favorite: true) { open(folder) }
+                            FileBrowserCard(title: folder.url.lastPathComponent, icon: "folder", favorite: true, activation: activation(for: folder)) {
+                                selectedFolderID = folder.id
+                            }.contextMenu { Button("打开") { open(folder) } }
                         }
                     }.padding(28)
                 }
             }
         }
+    }
+
+    private func activation(for folder: LibrarySource) -> FileItemActivation {
+        FileItemActivation(isSelected: selectedFolderID == folder.id) { open(folder) }
     }
 }

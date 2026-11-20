@@ -24,8 +24,11 @@ struct Media: Identifiable, Codable, Equatable, Sendable {
     var lastPlayed: Date?
     var sidecars: MediaSidecars?
     var localMetadata: LocalMetadata?
+    var fileVersion: MediaFileVersion?
     var sourceMissing: Bool?
     var playbackMemory: FilePlaybackMemory?
+    var recoveredRetiredHistory: Bool?
+    var directPlaybackURL: URL?
     var sourcePath: String { relativePath ?? url.lastPathComponent }
 
     fileprivate var hasPersonalState: Bool {
@@ -42,6 +45,19 @@ struct Media: Identifiable, Codable, Equatable, Sendable {
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return nil }
         return url
+    }
+}
+
+struct ScanChanges {
+    var added = 0
+    var updated = 0
+    var missing = 0
+    var hasChanges: Bool { added + updated + missing > 0 }
+
+    mutating func merge(_ changes: Self) {
+        added += changes.added
+        updated += changes.updated
+        missing += changes.missing
     }
 }
 
@@ -87,6 +103,7 @@ struct SavedLibrary: Codable, Sendable {
     private(set) var structureRevision = 0
     @ObservationIgnored private var groupMembership: [UUID: Int] = [:]
     @ObservationIgnored private var itemIndex: [UUID: Int] = [:]
+    private(set) var referencedSourceIDs: Set<UUID> = []
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
     @ObservationIgnored private let backgroundSaving: Bool
     @ObservationIgnored private let writer: LibraryWriter
@@ -118,7 +135,11 @@ struct SavedLibrary: Codable, Sendable {
         } catch { loadFailed = true; self.error = "媒体库读取失败，原文件已保留：\(error.localizedDescription)" }
         rebuildItemIndex()
     }
-    private func rebuildItemIndex() { itemIndex = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) }) }
+    private func rebuildItemIndex() {
+        itemIndex = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
+        let sourceIDs = Set(items.lazy.compactMap(\.sourceID))
+        if referencedSourceIDs != sourceIDs { referencedSourceIDs = sourceIDs }
+    }
     private func refreshGroup(for id: UUID) {
         guard let index = groupMembership[id], let previous = groupCache?[index] else { return }
         let updated = previous.items.compactMap { itemIndex[$0.id].map { items[$0] } }
@@ -212,7 +233,8 @@ struct SavedLibrary: Codable, Sendable {
         }
         if changed { save() }
     }
-    func importSource(_ source: UUID, files: [ScannedFile], complete: Bool = false) {
+    @discardableResult
+    func importSource(_ source: UUID, files: [ScannedFile], complete: Bool = false) -> ScanChanges {
         let fallbackLocal = files.first(where: { $0.url.isFileURL && $0.localFile == nil }).map { SourceWorker.localVolume($0.url) } ?? false
         var byPath: [String: Int] = [:]
         var byURL: [URL: Int] = [:]
@@ -221,7 +243,7 @@ struct SavedLibrary: Codable, Sendable {
             if item.sourceID == source, let relative = item.relativePath { byPath[relative] = i }
         }
         var seen: Set<String> = []
-        var changed = false
+        var changes = ScanChanges()
         for file in files {
             seen.insert(file.relativePath)
             let index = byPath[file.relativePath] ?? byURL[file.url]
@@ -234,6 +256,7 @@ struct SavedLibrary: Codable, Sendable {
             item.relativePath = file.relativePath
             item.remotePath = file.remotePath
             item.localFile = file.localFile ?? fallbackLocal
+            item.fileVersion = file.fileVersion
             if complete || file.sidecars != nil { item.sidecars = file.sidecars }
             if (complete && !file.nfoReadFailed) || (file.localMetadata != nil && (!file.nfoReadFailed || item.localMetadata == nil)) {
                 item.localMetadata = file.localMetadata
@@ -243,22 +266,26 @@ struct SavedLibrary: Codable, Sendable {
             if let index {
                 guard items[index] != item else { continue }
                 items[index] = item
+                changes.updated += 1
             } else {
                 byPath[file.relativePath] = items.count
                 byURL[file.url] = items.count
                 items.append(item)
+                changes.added += 1
             }
-            changed = true
         }
         if complete {
-            for (path, index) in byPath where !seen.contains(path) && items[index].sourceMissing != true {
+            for (path, index) in byPath where !seen.contains(path) &&
+                items[index].relativePath == path && items[index].sourceMissing != true {
                 items[index].sourceMissing = true
-                changed = true
+                changes.missing += 1
             }
         }
-        guard changed else { return }
-        rebuildItemIndex(); structureRevision += 1
-        save()
+        if changes.hasChanges {
+            rebuildItemIndex(); structureRevision += 1
+            save()
+        }
+        return changes
     }
     func setWatched(_ ids: [UUID], to value: Bool) {
         let selected = Set(ids)
@@ -267,6 +294,61 @@ struct SavedLibrary: Codable, Sendable {
             if !value { items[i].position = 0 }
         }
         refreshGroups(for: selected); save(invalidateGroups: false)
+    }
+    func setEpisodeWatched(_ id: UUID, to value: Bool) {
+        let versions = group(containing: id)?.episode(containing: id)?.files.map(\.id) ?? [id]
+        setWatched(versions, to: value)
+    }
+
+    private struct HistoryMatch: Hashable {
+        let relativePath: String
+        let kind: String
+        let workID: Int
+
+        init?(_ media: Media) {
+            guard let relativePath = media.relativePath, let metadata = media.metadata else { return nil }
+            self.relativePath = relativePath
+            kind = metadata.kind
+            workID = metadata.id
+        }
+    }
+
+    func recoverRetiredPlaybackHistory(from retiredSources: Set<UUID>) {
+        guard !retiredSources.isEmpty else { return }
+        var history: [HistoryMatch: Media] = [:]
+        for item in items {
+            guard item.sourceID.map(retiredSources.contains) == true,
+                  (item.isContinuing || item.isWatched), let key = HistoryMatch(item) else { continue }
+            if let existing = history[key] {
+                let old = existing.lastPlayed ?? .distantPast
+                let new = item.lastPlayed ?? .distantPast
+                if old > new || (old == new && (existing.isWatched || !item.isWatched)) { continue }
+            }
+            history[key] = item
+        }
+        guard !history.isEmpty else { return }
+
+        var destinations: [HistoryMatch: [Int]] = [:]
+        for (index, item) in items.enumerated() {
+            guard let source = item.sourceID, !retiredSources.contains(source), item.sourceMissing != true,
+                  let key = HistoryMatch(item), history[key] != nil else { continue }
+            destinations[key, default: []].append(index)
+        }
+        var changed: Set<UUID> = []
+        for (key, indices) in destinations {
+            guard indices.count == 1, let index = indices.first, let old = history[key],
+                  items[index].recoveredRetiredHistory != true, items[index].lastPlayed == nil,
+                  items[index].position == 0, items[index].watched == nil else { continue }
+            items[index].position = old.position
+            items[index].duration = old.duration
+            items[index].lastPlayed = old.lastPlayed
+            items[index].watched = old.isWatched
+            items[index].recoveredRetiredHistory = true
+            changed.insert(items[index].id)
+        }
+        guard !changed.isEmpty else { return }
+        refreshGroups(for: changed)
+        save(invalidateGroups: false)
     }
     func update(_ id: UUID, position: Double, duration: Double) {
         guard let index = itemIndex[id], position.isFinite, duration.isFinite else { return }
@@ -317,6 +399,7 @@ struct SavedLibrary: Codable, Sendable {
         relinked.localFile = replacement.localFile
         relinked.sidecars = replacement.sidecars
         relinked.localMetadata = replacement.localMetadata
+        relinked.fileVersion = replacement.fileVersion
         relinked.sourceMissing = nil
         if relinked.metadata == nil {
             relinked.metadata = replacement.metadata

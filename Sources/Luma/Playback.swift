@@ -37,10 +37,20 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         didSet { UserDefaults.standard.set(autoAdvance, forKey: "playback.autoAdvance") }
     }
     private var queue: [UUID] = []
+    private var unindexedQueueItems: [UUID: Media] = [:]
     private var queueLoops = false
     var selectableEpisodes: [Media] {
         guard let media, let group = library.group(containing: media.id), group.isTV else { return [] }
-        return group.items.filter { $0.sourceMissing != true }
+        let removed = sources?.removedSourceIDs(in: library.referencedSourceIDs) ?? []
+        var excluded = sources?.excludedSourceIDs ?? []
+        if let sourceID = media.sourceID { excluded.remove(sourceID) }
+        return group.episodes.compactMap { slot in
+            let files = slot.files.filter { item in
+                item.sourceMissing != true && (item.sourceID.map { !removed.contains($0) && !excluded.contains($0) } ?? true)
+            }
+            guard !files.isEmpty else { return nil }
+            return EpisodeSlot(id: slot.id, code: slot.code, files: files).preferredFile(favoring: media.id)
+        }
     }
     func selectEpisode(_ id: UUID) {
         guard id != media?.id, let episode = selectableEpisodes.first(where: { $0.id == id }) else { return }
@@ -51,6 +61,9 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         let ordered = shuffled ? available.shuffled() : available
         guard let first = ordered.first else { return }
         queue = ordered.map(\.id); queueLoops = loop
+        let indexedIDs = Set(library.items.map(\.id))
+        unindexedQueueItems = Dictionary(ordered.filter { !indexedIDs.contains($0.id) }.map { ($0.id, $0) },
+                                         uniquingKeysWith: { first, _ in first })
         preferences.options.repeatOne = false
         open(first)
     }
@@ -59,21 +72,31 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         if !queue.isEmpty {
             guard let index = queue.firstIndex(of: media.id) else { return nil }
             let previous = index > 0 ? queue[index - 1] : queueLoops ? queue.last : nil
-            return previous.flatMap { id in library.items.first { $0.id == id } }
+            return previous.flatMap(queuedMedia)
         }
-        guard let group = library.group(containing: media.id), group.isTV,
-              let index = group.items.firstIndex(where: { $0.id == media.id }) else { return nil }
-        let current = EpisodeCode(media)
-        return group.items.prefix(index).reversed().first { $0.sourceMissing != true && (current.episode == 0 || EpisodeCode($0) < current) }
+        return adjacentEpisode(offset: -1)
     }
     var nextEpisode: Media? {
         if !queue.isEmpty {
             guard let id = media?.id, let index = queue.firstIndex(of: id) else { return nil }
             let next = index + 1 < queue.count ? queue[index + 1] : queueLoops ? queue[0] : nil
-            return next.flatMap { id in library.items.first { $0.id == id } }
+            return next.flatMap(queuedMedia)
         }
-        guard let media else { return nil }
-        return Self.nextEpisode(after: media.id, groups: library.groupedItems)
+        return adjacentEpisode(offset: 1)
+    }
+    private func adjacentEpisode(offset: Int) -> Media? {
+        guard let current = media?.id else { return nil }
+        let episodes = selectableEpisodes
+        guard let index = episodes.firstIndex(where: { $0.id == current }),
+              episodes.indices.contains(index + offset) else { return nil }
+        return episodes[index + offset]
+    }
+    private func queuedMedia(_ id: UUID) -> Media? {
+        library.items.first { $0.id == id } ?? unindexedQueueItems[id]
+    }
+
+    private func clearPlaybackQueue() {
+        queue = []; unindexedQueueItems = [:]; queueLoops = false
     }
     nonisolated static func nextEpisode(after id: UUID, groups: [MediaGroup]) -> Media? {
         guard let group = groups.first(where: { $0.isTV && $0.items.contains(where: { $0.id == id }) }),
@@ -91,7 +114,8 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
             else { let current = player.currentItem; Task { await player.seek(to: .zero); guard player.currentItem === current else { return }; player.playImmediately(atRate: Float(preferences.options.speed)) } }
             return
         }
-        saveProgress(); library.setWatched([media.id], to: true)
+        saveProgress()
+        markCompleted(media)
         if (!queue.isEmpty || autoAdvance), let next = nextEpisode { open(next) }
     }
     var autoSkipEnabled = UserDefaults.standard.object(forKey: "playback.autoSkip") as? Bool ?? true {
@@ -119,9 +143,9 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     }
     func playNextFromCredits() {
         guard activeCredits != nil, let next = nextEpisode else { return }
-        let completed = media?.id
+        let completed = media
         open(next) // close() saves the outgoing position before the completed flag is written.
-        if let completed { library.setWatched([completed], to: true) }
+        if let completed { markCompleted(completed) }
     }
     func updateAutoSkip() {
         if mpv == nil { nativeSkipPosition = player.currentTime().seconds }
@@ -165,15 +189,25 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
     private var volumeStatus: NSKeyValueObservation?
     private var muteStatus: NSKeyValueObservation?
     private let library: Library
-    init(library: Library, preferences: PlaybackPreferences? = nil) { self.library = library; self.preferences = preferences ?? PlaybackPreferences() }
+    private let sources: SourcesStore?
+    private let directHistory: DirectFilePlaybackHistory
+    private var completedDirectFileID: UUID?
+    init(library: Library, preferences: PlaybackPreferences? = nil, sources: SourcesStore? = nil,
+         directHistory: DirectFilePlaybackHistory? = nil) {
+        self.library = library
+        self.preferences = preferences ?? PlaybackPreferences()
+        self.sources = sources
+        self.directHistory = directHistory ?? DirectFilePlaybackHistory()
+    }
     func open(_ media: Media) {
         open(media, handoff: nil)
     }
-    private func open(_ media: Media, handoff: AirPlayHandoff?) {
+    private func open(_ incoming: Media, handoff: AirPlayHandoff?) {
         let preferAirPlay = handoff != nil || player.isExternalPlaybackActive
         close(clearQueue: false)
+        let media = directHistory.mediaRestoringProgress(incoming)
         usingNativeAirPlay = preferAirPlay
-        if !queue.contains(media.id) { queue = []; queueLoops = false }
+        if !queue.contains(media.id) { clearPlaybackQueue() }
         self.media = media
         guard media.sourceMissing != true else {
             error = "来源中找不到此文件。文件恢复后可重新扫描来源。"
@@ -458,19 +492,39 @@ struct PlayerTrackChoice: Identifiable { let id: Int; let title: String }
         nativeSubtitleID = id
     }
     func saveProgress() {
-        if let media, let mpv { if mpv.duration > 0 && !mpv.loading { library.update(media.id, position: mpv.position, duration: mpv.duration) }; return }
-
-        guard let media, let item = player.currentItem else { return }
-        library.update(media.id, position: player.currentTime().seconds, duration: item.duration.seconds)
+        guard let media else { return }
+        if let mpv {
+            if mpv.duration > 0 && !mpv.loading {
+                recordProgress(for: media, position: mpv.position, duration: mpv.duration)
+            }
+        } else if let item = player.currentItem, media.directPlaybackURL == nil || !loading {
+            recordProgress(for: media, position: player.currentTime().seconds, duration: item.duration.seconds)
+        }
+    }
+    private func recordProgress(for media: Media, position: Double, duration: Double) {
+        if let directURL = media.directPlaybackURL {
+            directHistory.record(directURL, position: position, duration: duration, watched: completedDirectFileID == media.id)
+        } else {
+            library.update(media.id, position: position, duration: duration)
+        }
+    }
+    private func markCompleted(_ media: Media) {
+        if let directURL = media.directPlaybackURL {
+            if media.id == self.media?.id { completedDirectFileID = media.id }
+            directHistory.finish(directURL)
+            directHistory.flush()
+        } else {
+            library.setEpisodeWatched(media.id, to: true)
+        }
     }
     func close(clearQueue: Bool = true) {
-        if clearQueue { queue = []; queueLoops = false }
+        if clearQueue { clearPlaybackQueue() }
         preparation?.cancel(); preparation = nil
         preparingAirPlay = false; airPlayMessage = nil; usingNativeAirPlay = false
         compatibilityTask?.cancel(); compatibilityTask = nil; exportingCompatibility = false; compatibilityMessage = ""
         technicalInfo = nil; resolvedPlaybackURL = nil; resolvedSubtitles = []
         skipTask?.cancel(); skipTask = nil; skipAttempted = nil; detectedSkip = SkipDetection(); nativeChapters = []; skipAnalysis = ""
-        saveProgress(); timer?.invalidate(); timer = nil
+        saveProgress(); directHistory.flush(); completedDirectFileID = nil; timer?.invalidate(); timer = nil
         mpv?.stop(); mpv = nil
         status = nil; volumeStatus = nil; muteStatus = nil; player.pause(); player.replaceCurrentItem(with: nil)
         media = nil; error = nil; loading = false; technicalInfo = nil; resolvedPlaybackURL = nil

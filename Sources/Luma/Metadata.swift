@@ -54,6 +54,16 @@ struct CastMember: Codable, Equatable, Sendable, Identifiable {
     let photo: URL?
 }
 
+struct TMDBTitleID: Hashable, Sendable, Decodable {
+    let id: Int
+    let kind: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind = "media_type"
+    }
+}
+
 struct MediaName: Sendable {
     private static let prefixPattern = FilenamePattern(#"^\[[^\]]+\]\s*"#)
     private static let episodePattern = FilenamePattern(#"(?i)(?<![A-Za-z0-9])S\d{1,2}(?:E\d{1,3})?(?![A-Za-z0-9])|\b\d{1,2}x\d{1,3}\b|第[一二三四五六七八九十\d]+[季集]"#)
@@ -219,6 +229,16 @@ actor TMDBClient {
         struct Person: Decodable { let id: Int; let name: String; let character: String?; let profile_path: String? }
     }
     private var detailCache: [String: MovieInfo] = [:]
+    private var castCreditsCache: [Int: Set<TMDBTitleID>] = [:]
+    func castCredits(personID: Int, token: String) async throws -> Set<TMDBTitleID> {
+        if let cached = castCreditsCache[personID] { return cached }
+        struct Credits: Decodable { let cast: [TMDBTitleID] }
+        let data = try await request("person/\(personID)/combined_credits", token: token)
+        let credits = Set(try JSONDecoder().decode(Credits.self, from: data).cast)
+        castCreditsCache[personID] = credits
+        return credits
+    }
+
     func details(_ info: MovieInfo, token: String) async throws -> MovieInfo {
         let key = "\(info.kind):\(info.id)"
         if let cached = detailCache[key] { return cached }

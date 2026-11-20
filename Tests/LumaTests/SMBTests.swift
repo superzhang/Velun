@@ -2,6 +2,33 @@ import Foundation
 import Testing
 @testable import Luma
 
+@Test func finderReusesResolvedMountAndDoesNotRemountWhenFileIsMissing() async throws {
+    let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appending(component: "Fixture.mkv")
+    try Data().write(to: file)
+    let sourceURL = try #require(URL(string: "smb://nas.local/Video"))
+    let bonjour = try #require(URL(string: "smb://NAS._smb._tcp.local/Video"))
+    let share = DiscoveredShare(name: "Video", kind: .smb, url: bonjour, mountedURL: root,
+                                mountedSMBEndpoint: MountedSMBEndpoint(host: "nas.local.", port: 445, addresses: []))
+    let source = LibrarySource(name: "NAS", url: sourceURL, connectionKind: .smb, directSMB: true)
+    let media = Media(url: RemoteSources.virtualURL(source: source.id, path: "Fixture.mkv"),
+                      title: "Fixture", relativePath: "Fixture.mkv")
+    let refuseMount: @Sendable (URL) async throws -> URL = { _ in
+        Issue.record("An already mounted share must not be mounted again")
+        throw POSIXError(.EEXIST)
+    }
+    #expect(try await FinderLocation.resolve(media, source: source, mount: refuseMount, mountedShares: { [share] }) == file)
+    try FileManager.default.removeItem(at: file)
+    do {
+        _ = try await FinderLocation.resolve(media, source: source, mount: refuseMount, mountedShares: { [share] })
+        Issue.record("Missing local file was unexpectedly found")
+    } catch {
+        #expect(error.localizedDescription.contains("在已连接的来源中找不到"))
+    }
+}
+
 @Test func finderResolvesMountedSMBAndReportsMissingFiles() async throws {
     let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
     let directory = root.appending(component: "影视 100%")
@@ -16,14 +43,14 @@ import Testing
     let mount: @Sendable (URL) async throws -> URL = { _ in root }
 
     #expect(FinderLocation.isAvailable(for: media, source: source))
-    #expect(try await FinderLocation.resolve(media, source: source, mount: mount) == file)
+    #expect(try await FinderLocation.resolve(media, source: source, mount: mount, mountedShares: { [] }) == file)
     media.url = root.appending(component: "old-mount").appending(component: "影片 #1.mkv")
-    #expect(try await FinderLocation.resolve(media, source: source, mount: mount) == file)
+    #expect(try await FinderLocation.resolve(media, source: source, mount: mount, mountedShares: { [] }) == file)
     media.url = file
     #expect(try await FinderLocation.resolve(media, source: nil) == file)
     try FileManager.default.removeItem(at: file)
     await #expect(throws: NSError.self) {
-        _ = try await FinderLocation.resolve(media, source: source, mount: mount)
+        _ = try await FinderLocation.resolve(media, source: source, mount: mount, mountedShares: { [] })
     }
 }
 
@@ -140,6 +167,9 @@ import Testing
     let metadata = MetadataStore(defaults: preferences)
     metadata.autoMatch = false
 
+    store.setLibraryInclusion(false, for: source.id)
+    #expect(!store.refreshNetwork(library: library, metadata: metadata))
+    store.setLibraryInclusion(true, for: source.id)
     #expect(store.refreshNetwork(library: library, metadata: metadata))
     try await awaitSourceScan(store)
     #expect(store.scanIssues[source.id] == .notMounted)
@@ -162,6 +192,42 @@ import Testing
     #expect(store.scanIssues[source.id] == nil)
     #expect(store.sources.first?.lastScan != nil)
     #expect(library.items.first?.url.lastPathComponent == "Movie.mkv")
+    #expect(store.status.contains("更新 1"))
+    store.scan(updated, library: library, metadata: metadata)
+    try await awaitSourceScan(store)
+    #expect(store.status.contains("媒体库无变化"))
+}
+
+@Test @MainActor func multiSourceRefreshKeepsSuccessfulResultsWhenAnotherSourceFails() async throws {
+    let root = URL.temporaryDirectory.appending(component: UUID().uuidString)
+    let mediaFolder = root.appending(component: "Media")
+    try FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let movie = mediaFolder.appending(component: "Movie.mkv")
+    try Data().write(to: movie)
+    let library = Library(file: root.appending(component: "library.json"))
+    let store = SourcesStore(file: root.appending(component: "sources.json"))
+    let unavailable = store.add(name: "不可用目录", url: root.appending(component: "Unavailable"))
+    let available = store.add(name: "可用目录", url: mediaFolder)
+    let suiteName = "Velun-Test-\(UUID())"
+    let preferences = try #require(UserDefaults(suiteName: suiteName))
+    defer { preferences.removePersistentDomain(forName: suiteName) }
+    let metadata = MetadataStore(defaults: preferences)
+    metadata.autoMatch = false
+
+    store.refreshLibrary(library: library, metadata: metadata)
+    try await awaitSourceScan(store)
+    #expect(store.scanIssues[unavailable.id] != nil)
+    #expect(store.scanIssues[available.id] == nil)
+    #expect(library.items.map(\.sourceID) == [available.id])
+    #expect(store.status.contains("新增 1"))
+    #expect(store.status.contains("1 个来源需检查"))
+
+    try FileManager.default.removeItem(at: movie)
+    store.refreshLibrary(library: library, metadata: metadata)
+    try await awaitSourceScan(store)
+    #expect(library.items.first?.sourceMissing == true)
+    #expect(store.status.contains("新标记缺失 1"))
 }
 
 @Test(.enabled(if: ProcessInfo.processInfo.environment["VELUN_ACCEPT_MOUNTED_SMB"] == "1")) @MainActor

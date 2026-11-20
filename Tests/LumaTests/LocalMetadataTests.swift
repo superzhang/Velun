@@ -2,6 +2,37 @@ import Foundation
 import Testing
 @testable import Luma
 
+@Test func nfoRescanReusesVersionsAndRetriesUnreadableFiles() async throws {
+    let folder = URL.temporaryDirectory.appending(component: UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let local = folder.appending(component: "movie.nfo")
+    let remote = URL(string: "https://fixture.invalid/movie.nfo")!
+    let video = ScannedFile(url: folder.appending(component: "movie.mkv"), relativePath: "movie.mkv",
+                            nfo: NFOCandidates(video: remote))
+    let firstVersion = MediaFileVersion(size: 42, modified: "2026-01-01")
+    let secondVersion = MediaFileVersion(size: 42, modified: "2026-01-02")
+    try Data("<movie><title>First</title></movie>".utf8).write(to: local)
+    let initial = try await NFOReader.enrich([video], previous: .init(), versions: [remote: firstVersion]) { _ in local }
+    let repeated = try await NFOReader.enrich([video], previous: initial.cache, versions: [remote: firstVersion]) { _ in
+        Issue.record("Unchanged file was read again")
+        throw URLError(.timedOut)
+    }
+    #expect(repeated.files.first?.localMetadata?.work?.title == "First")
+
+    let failed = try await NFOReader.enrich([video], previous: repeated.cache, versions: [remote: secondVersion]) { _ in
+        throw URLError(.timedOut)
+    }
+    #expect(failed.files.first?.nfoReadFailed == true)
+    try Data("<movie><title>Later</title></movie>".utf8).write(to: local)
+    let retried = try await NFOReader.enrich([video], previous: failed.cache, versions: [remote: secondVersion]) { _ in local }
+    #expect(retried.files.first?.localMetadata?.work?.title == "Later")
+    let unversioned = try await NFOReader.enrich([video], previous: retried.cache, versions: [:]) { _ in
+        throw URLError(.timedOut)
+    }
+    #expect(unversioned.files.first?.nfoReadFailed == true)
+}
+
 @Test func nfoParsesMetadataAndRejectsCustomEntities() throws {
     let xml = """
     <movie>
@@ -62,7 +93,7 @@ import Testing
     #expect(library.groupedItems.first?.title == "本地剧集")
 
     try Data("<tvshow><title>更新后的剧名</title></tvshow>".utf8).write(to: showNFO)
-    let updated = try await SourceWorker.scan(root)
+    let updated = try await SourceWorker.scan(root, previous: try #require(scan.nfoCache))
     library.importSource(source, files: updated.files, complete: true)
     let restored = Library(file: db)
     #expect(restored.groupedItems.first?.title == "更新后的剧名")

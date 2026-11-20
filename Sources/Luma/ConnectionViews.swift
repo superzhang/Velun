@@ -128,12 +128,13 @@ struct MatchView: View {
 struct PosterView: View {
     let url: URL?
     var fallbackURL: URL? = nil
+    var placeholderSymbol = "photo"
     @State private var image: NSImage?
     var body: some View {
         ZStack {
             LumaTheme.ink.opacity(0.05)
             if let image { GeometryReader { geometry in Image(nsImage: image).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped() } }
-            else { Image(systemName: "photo").foregroundStyle(.secondary) }
+            else { Image(systemName: placeholderSymbol).foregroundStyle(.secondary) }
         }.task(id: url) {
             image = nil
             if let fallbackURL, let data = await PosterCache.shared.cachedData(for: fallbackURL), !Task.isCancelled { image = NSImage(data: data) }

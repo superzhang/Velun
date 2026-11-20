@@ -1,6 +1,6 @@
 import Foundation
 
-struct EpisodeCode: Comparable, Sendable {
+struct EpisodeCode: Comparable, Hashable, Sendable {
     private static let standard = FilenamePattern(#"(?i)S\d{1,2}E\d{1,3}"#)
     private static let alternative = FilenamePattern(#"\b\d{1,2}x\d{1,3}\b"#)
     private static let chineseSeason = FilenamePattern("第[一二三四五六七八九十百零〇两0-9]+季")
@@ -40,6 +40,37 @@ struct EpisodeCode: Comparable, Sendable {
     static func < (lhs: Self, rhs: Self) -> Bool { (lhs.season, lhs.episode) < (rhs.season, rhs.episode) }
 }
 
+struct EpisodeSlot: Identifiable, Sendable {
+    enum ID: Hashable, Sendable {
+        case numbered(EpisodeCode)
+        case unnumbered(UUID)
+    }
+
+    let id: ID
+    let code: EpisodeCode
+    let files: [Media]
+    var isWatched: Bool { files.contains(where: \.isWatched) }
+
+    func preferredFile(favoring selectedID: UUID? = nil) -> Media {
+        if let selectedID, let selected = files.first(where: { $0.id == selectedID }) { return selected }
+        return files.lazy.filter { $0.sourceMissing != true && $0.isContinuing }
+            .max { ($0.lastPlayed ?? .distantPast) < ($1.lastPlayed ?? .distantPast) }
+            ?? files.first { $0.sourceMissing != true } ?? files[0]
+    }
+
+    static func make(_ items: [Media], codes: [UUID: EpisodeCode]? = nil) -> [Self] {
+        var order: [(ID, EpisodeCode)] = []
+        var buckets: [ID: [Media]] = [:]
+        for item in items {
+            let code = codes?[item.id] ?? EpisodeCode(item)
+            let key: ID = code.episode > 0 ? .numbered(code) : .unnumbered(item.id)
+            if buckets[key] == nil { order.append((key, code)) }
+            buckets[key, default: []].append(item)
+        }
+        return order.map { id, code in Self(id: id, code: code, files: buckets[id]!) }
+    }
+}
+
 struct MediaGroup: Identifiable, Sendable {
     let id: String
     let items: [Media]
@@ -56,6 +87,7 @@ struct MediaGroup: Identifiable, Sendable {
     var year: String? { nfo?.year ?? nfo?.releaseDate.map { String($0.prefix(4)) } ?? info?.year }
     var genres: [String] { nfo.map(\.genres).flatMap { $0.isEmpty ? nil : $0 } ?? info?.genres ?? [] }
     let isTV: Bool
+    let episodes: [EpisodeSlot]
     let title: String
     let subtitle: String
     let isWatched: Bool
@@ -78,27 +110,47 @@ struct MediaGroup: Identifiable, Sendable {
         let parsed = knownTitle == nil ? MediaName(items[0].url.deletingPathExtension().lastPathComponent) : nil
         let localKind = nfo?.kind ?? episode?.kind
         isTV = localKind.map { $0 != .movie } ?? info.map { $0.kind == "tv" } ?? parsed?.isTV ?? false
+        episodes = isTV ? EpisodeSlot.make(items, codes: codes) : []
         title = knownTitle ?? (isTV ? parsed.flatMap { $0.title.isEmpty ? nil : $0.title } : nil) ?? items[0].title
         if let template { subtitle = template.subtitle }
         else if isTV {
-            let seasons = Set(items.map { codes?[$0.id]?.season ?? EpisodeCode($0).season })
-            subtitle = "\(seasons.count) 季 · \(items.count) 集"
+            let seasons = Set(episodes.map { $0.code.season })
+            subtitle = "\(seasons.count) 季 · \(episodes.count) 集"
         } else if items.count > 1 { subtitle = "\(items.count) 项内容" }
         else {
             let year = nfo?.year ?? nfo?.releaseDate.map { String($0.prefix(4)) } ?? info?.year
             subtitle = year.flatMap { $0.isEmpty ? nil : $0 } ?? items[0].format
         }
-        isWatched = items.allSatisfy(\.isWatched)
+        isWatched = isTV ? episodes.allSatisfy(\.isWatched) : items.allSatisfy(\.isWatched)
         hasFavorite = items.contains(where: \.favorite)
         lastPlayed = items.compactMap(\.lastPlayed).max() ?? .distantPast
         added = items.map(\.added).max() ?? .distantPast
         let available = items.filter { $0.sourceMissing != true }
         let playable = available.isEmpty ? items : available
-        resume = playable.filter { $0.isContinuing || $0.watchlisted == true }.max { ($0.lastPlayed ?? .distantPast) < ($1.lastPlayed ?? .distantPast) } ?? playable.first(where: { !$0.isWatched }) ?? playable[0]
+        let unfinishedEpisode = episodes.first { !$0.isWatched && $0.files.contains { $0.sourceMissing != true } }
+        resume = playable.filter { $0.isContinuing || $0.watchlisted == true }
+            .max { ($0.lastPlayed ?? .distantPast) < ($1.lastPlayed ?? .distantPast) }
+            ?? unfinishedEpisode?.preferredFile()
+            ?? (isTV ? nil : playable.first { !$0.isWatched })
+            ?? playable[0]
         if let template { searchIndex = template.searchIndex }
         else {
             let searchable = items.flatMap { [$0.title, $0.localMetadata?.episode?.title].compactMap { $0 } }
             searchIndex = Self.searchKey(([title] + searchable).joined(separator: "\n"))
+        }
+    }
+
+    func episode(containing id: UUID) -> EpisodeSlot? {
+        episodes.first { $0.files.contains { $0.id == id } }
+    }
+
+    func playbackItems(favoring selectedID: UUID? = nil) -> [Media] {
+        guard isTV else { return items }
+        return episodes.compactMap { slot in
+            let preferred = slot.preferredFile(favoring: selectedID)
+            if preferred.sourceMissing != true { return preferred }
+            let available = slot.preferredFile()
+            return available.sourceMissing == true ? nil : available
         }
     }
     static func searchKey(_ value: String) -> String {

@@ -4,12 +4,18 @@ import AVFoundation
 
 enum Destination: Hashable {
     case home, libraryOverview, recent, all, movies, shows, unwatched, favorites, top, genres, unmatched, files, missing, source(UUID), playlist(String), collection(String)
+    case performer(Int, String)
     var title: String {
-        switch self { case .home: "主屏幕"; case .libraryOverview: "媒体库"; case .recent: "最近添加"; case .all: "全部视频"; case .movies: "电影"; case .shows: "电视剧"; case .unwatched: "未观看的"; case .favorites: "我的收藏"; case .top: "最受好评的电影"; case .genres: "电影类型"; case .unmatched: "待匹配"; case .files: "文件"; case .missing: "缺失文件"; case .source: "文件来源"; case .playlist(let name): name; case .collection(let name): name }
+        switch self { case .home: "主屏幕"; case .libraryOverview: "媒体库"; case .recent: "最近添加"; case .all: "全部视频"; case .movies: "电影"; case .shows: "电视剧"; case .unwatched: "未观看的"; case .favorites: "我的收藏"; case .top: "最受好评的电影"; case .genres: "电影类型"; case .unmatched: "待匹配"; case .files: "文件"; case .missing: "缺失文件"; case .source: "文件来源"; case .playlist(let name), .collection(let name), .performer(_, let name): name }
     }
 }
 
 struct RootView: View {
+    private enum Page {
+        case detail(UUID)
+        case performer(CastMember)
+    }
+
     @Bindable var library: Library
     @Bindable var playback: Playback
     @Bindable var sources: SourcesStore
@@ -17,7 +23,10 @@ struct RootView: View {
     @Environment(\.openSettings) private var openSettings
     @State private var destination: Destination = .home
     @State private var returnsToLibraryOverview = false
-    @State private var detailID: UUID?
+    @State private var pages: [Page] = []
+    @State private var performerCredits: [Int: Set<TMDBTitleID>] = [:]
+    @State private var failedPerformerLookup: Int?
+    @State private var performerGridAnchor: String?
     @State private var selectedDetailID: UUID?
     @State private var search = ""
     @FocusState private var searchFocused: Bool
@@ -25,6 +34,7 @@ struct RootView: View {
     @State private var homeExpanded = false
     @State private var libraryExpanded = false
     @State private var filesExpanded = false
+    @State private var selectedFileFolderID: UUID?
     @State private var sourcePanel: SourcePanelOpening?
     @State private var showTMDB = false
     @State private var matching: Media?
@@ -42,10 +52,18 @@ struct RootView: View {
     @State private var featuredMediaID: UUID?
     @AppStorage("library.posterWidth") private var posterWidth = 155.0
     private let background = LumaTheme.canvas
+    private var detailID: UUID? {
+        if case .detail(let id) = pages.last { return id }
+        return nil
+    }
+    private var performer: CastMember? {
+        if case .performer(let member) = pages.last { return member }
+        return nil
+    }
     private var excludedSourceIDs: Set<UUID> {
         switch destination {
         case .files, .missing, .source: []
-        default: sources.excludedSourceIDs
+        default: sources.excludedSourceIDs.union(sources.removedSourceIDs(in: library.referencedSourceIDs))
         }
     }
     private var detail: MediaGroup? {
@@ -59,7 +77,7 @@ struct RootView: View {
         return visible.isEmpty ? nil : MediaGroup(id: group.id, items: visible)
     }
     private var showsLibraryOverview: Bool {
-        destination == .libraryOverview && detailID == nil && search.isEmpty
+        destination == .libraryOverview && pages.isEmpty && search.isEmpty
     }
     private var fileWorkspace: Bool {
         switch destination {
@@ -72,7 +90,12 @@ struct RootView: View {
         return nil
     }
     private var groups: [MediaGroup] {
-        queryCache.groups(in: library, destination: destination, search: search, localOnly: localOnly, genre: selectedGenre, sort: sort, excludedSourceIDs: excludedSourceIDs)
+        if let performer {
+            return queryCache.groups(in: library, destination: .performer(performer.id, performer.name),
+                                     localOnly: localOnly, sort: sort, excludedSourceIDs: excludedSourceIDs,
+                                     castCredits: performerCredits[performer.id] ?? [])
+        }
+        return queryCache.groups(in: library, destination: destination, search: search, localOnly: localOnly, genre: selectedGenre, sort: sort, excludedSourceIDs: excludedSourceIDs)
     }
     var body: some View {
         ZStack {
@@ -83,14 +106,25 @@ struct RootView: View {
                         filesHome
                     } else if let fileSourceID {
                         SourcesView(store: sources, library: library, metadata: metadata, play: playback.open,
-                                    initialSourceID: fileSourceID, filter: search, backToFiles: { navigate(.files) })
+                                    initialSourceID: fileSourceID, filter: search, backToFiles: { navigate(.files) },
+                                    playQueue: playback.playQueue)
                             .id(fileSourceID)
                     } else {
                         VStack(spacing: 0) {
                             toolbar
                             Divider().opacity(0.25)
                             if let detail {
-                                DetailView(group: detail, library: library, metadata: metadata, playback: playback, sourceName: sources.sources.first { $0.id == detail.representative.sourceID }?.name, play: { playback.open($0) }, match: { matching = $0 }, selectionChanged: { selectedDetailID = $0.id }, finderAction: finderAction)
+                                DetailView(group: detail, library: library, metadata: metadata, playback: playback,
+                                           sourceName: { item in sources.sources.first { $0.id == item.sourceID }?.name },
+                                           play: { playback.open($0) }, match: { matching = $0 },
+                                           selectionChanged: { selectedDetailID = $0.id }, finderAction: finderAction,
+                                           openPerformer: { member in
+                                               performerGridAnchor = nil
+                                               pages.append(.performer(member))
+                                           })
+                                    .id(detailID)
+                            } else if performer != nil {
+                                gridPage
                             } else if showsLibraryOverview { libraryOverview }
                             else if destination == .missing {
                                 MissingFilesView(library: library, sources: sources, metadata: metadata, search: search)
@@ -113,7 +147,7 @@ struct RootView: View {
             SourcesView(store: sources, library: library, metadata: metadata, play: playback.open, opening: opening)
         }
         .sheet(isPresented: $showTMDB) { TMDBSettingsView(store: metadata, library: library).tint(.orange) }
-        .sheet(item: $matching) { item in MatchView(media: item, library: library, store: metadata).tint(.orange) }
+        .sheet(item: $matching, onDismiss: recoverPlaybackHistory) { item in MatchView(media: item, library: library, store: metadata).tint(.orange) }
         .alert("无法在 Finder 中显示", isPresented: Binding(
             get: { finderError != nil }, set: { if !$0 { finderError = nil } }
         )) {
@@ -121,10 +155,33 @@ struct RootView: View {
         } message: {
             Text(finderError ?? "")
         }
-        .task { if metadata.autoMatch { metadata.matchMissing(library) } }
-        .onChange(of: library.structureRevision) { _, _ in if metadata.autoMatch { metadata.matchMissing(library) } }
-        .onChange(of: search) { _, value in if !value.isEmpty { detailID = nil } }
+        .task {
+            recoverPlaybackHistory()
+            if metadata.autoMatch { metadata.matchMissing(library) }
+        }
+        .onChange(of: library.structureRevision) { _, _ in
+            recoverPlaybackHistory()
+            if metadata.autoMatch { metadata.matchMissing(library) }
+        }
+        .onChange(of: metadata.busy) { _, busy in if !busy { recoverPlaybackHistory() } }
+        .onChange(of: sources.removedSourceIDs(in: library.referencedSourceIDs)) { _, _ in recoverPlaybackHistory() }
+        .onChange(of: search) { _, value in if !value.isEmpty { pages.removeAll() } }
+        .task(id: metadata.configured ? performer?.id : nil) {
+            guard metadata.configured, let performer, performerCredits[performer.id] == nil else { return }
+            failedPerformerLookup = nil
+            do {
+                let credits = try await metadata.client.castCredits(personID: performer.id, token: try await KeychainToken.readAsync())
+                try Task.checkCancellation()
+                performerCredits[performer.id] = credits
+            } catch {
+                if !Task.isCancelled { failedPerformerLookup = performer.id }
+            }
+        }
     }
+    private func recoverPlaybackHistory() {
+        library.recoverRetiredPlaybackHistory(from: sources.removedSourceIDs(in: library.referencedSourceIDs))
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -171,7 +228,7 @@ struct RootView: View {
         }.frame(width: 250).background(LumaTheme.sidebar)
     }
     private func sidebarHeader(_ title: String, icon: String, destination target: Destination, expanded: Binding<Bool>) -> some View {
-        let selected = detailID == nil && (destination == target || (target == .files && fileSourceID != nil))
+        let selected = pages.isEmpty && (destination == target || (target == .files && fileSourceID != nil))
             && (search.isEmpty || target == .files)
         return HStack(spacing: 0) {
             Button { navigate(target) } label: {
@@ -199,30 +256,39 @@ struct RootView: View {
                 Spacer(minLength: 0)
             }.padding(.leading, indented ? 30 : 14).padding(.trailing, 10)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-        }.buttonStyle(SidebarButtonStyle(selected: destination == target && detailID == nil))
-            .accessibilityAddTraits(destination == target && detailID == nil ? .isSelected : [])
+        }.buttonStyle(SidebarButtonStyle(selected: destination == target && pages.isEmpty))
+            .accessibilityAddTraits(destination == target && pages.isEmpty ? .isSelected : [])
     }
     private func navigate(_ target: Destination) {
         destination = target
+        if case .source(let id) = target { selectedFileFolderID = id }
         returnsToLibraryOverview = false
-        detailID = nil
+        pages.removeAll()
         search = ""
         selectedGenre = nil
         gridAnchor = nil
         if target == .home { featuredMediaID = nil }
     }
+    private func openDetail(_ group: MediaGroup) {
+        selectedDetailID = nil
+        pages.append(.detail(group.representative.id))
+    }
     private var toolbar: some View {
         HStack(spacing: 18) {
             Button {
-                if detailID != nil { detailID = nil }
+                if !pages.isEmpty {
+                    pages.removeLast()
+                    selectedDetailID = nil
+                }
                 else if selectedGenre != nil { selectedGenre = nil }
                 else if returnsToLibraryOverview { navigate(.libraryOverview) }
                 else { navigate(.home) }
-            } label: { Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).frame(width: 28, height: 28) }.buttonStyle(.plain).disabled(detailID == nil && destination == .home).help("返回")
+            } label: { Image(systemName: "chevron.left").font(.system(size: 16, weight: .semibold)).frame(width: 28, height: 28) }.buttonStyle(.plain).disabled(pages.isEmpty && destination == .home).accessibilityLabel("返回").help("返回")
             if let detail { Text(detail.title).font(.headline).lineLimit(1) }
+            else if let performer { Text(performer.name).font(.headline).lineLimit(1).accessibilityAddTraits(.isHeader) }
             else { Text(search.isEmpty ? (selectedGenre ?? destination.title) : "搜索结果").font(.headline) }
             Spacer()
-            if detailID == nil && destination == .home && search.isEmpty && !sources.networkFileShares.isEmpty {
+            if pages.isEmpty && destination == .home && search.isEmpty && !sources.networkFileShares.isEmpty {
                 let warningCount = sources.networkIssueCount
                 if warningCount > 0 {
                     Button { navigate(.files) } label: {
@@ -294,6 +360,11 @@ struct RootView: View {
                 Spacer()
                 FileLayoutButton(listMode: $filesInList)
                 Menu {
+                    if let selected = sources.starredSMBFolders.first(where: { $0.id == selectedFileFolderID }),
+                       search.isEmpty || selected.url.lastPathComponent.localizedStandardContains(search) {
+                        Button("打开所选文件夹") { navigate(.source(selected.id)) }
+                        Divider()
+                    }
                     Picker("按名称排序", selection: $descendingFileNames) {
                         Text("升序").tag(false)
                         Text("降序").tag(true)
@@ -312,7 +383,8 @@ struct RootView: View {
             }.padding(.horizontal, 24).frame(height: 56)
             Divider().opacity(0.45)
             FileFavoritesPage(folders: sources.starredSMBFolders, filter: search, listMode: filesInList,
-                              descendingNames: descendingFileNames, open: { navigate(.source($0.id)) },
+                              descendingNames: descendingFileNames, selectedFolderID: $selectedFileFolderID,
+                              open: { navigate(.source($0.id)) },
                               addSource: { sourcePanel = .add })
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(background)
@@ -320,14 +392,14 @@ struct RootView: View {
     private var isCustomList: Bool { switch destination { case .playlist, .collection: true; default: false } }
     private var gridPage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if isCustomList {
+            if performer == nil && isCustomList {
                 HStack {
-                    Button("播放全部") { playback.playQueue(groups.flatMap(\.items), shuffled: false, loop: false) }
-                    Button("随机播放") { playback.playQueue(groups.flatMap(\.items), shuffled: true, loop: false) }
+                    Button("播放全部") { playback.playQueue(groups.flatMap { $0.playbackItems() }, shuffled: false, loop: false) }
+                    Button("随机播放") { playback.playQueue(groups.flatMap { $0.playbackItems() }, shuffled: true, loop: false) }
                     Spacer()
                 }.disabled(groups.isEmpty).padding(.horizontal, 28).padding(.top, 16)
             }
-            if destination == .unmatched {
+            if performer == nil && destination == .unmatched {
                 HStack {
                     Text("\(groups.count) 个作品待确认 · 右键海报可编辑影片信息").font(.caption).foregroundStyle(.secondary)
                     Spacer()
@@ -335,12 +407,13 @@ struct RootView: View {
                 }.padding(.horizontal, 28).padding(.top, 16)
             }
         Group {
-            if groups.isEmpty { emptyView }
+            if groups.isEmpty, let performer { emptyPerformerView(performer) }
+            else if groups.isEmpty { emptyView }
             else if listMode {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(groups) { group in
-                            Button { detailID = group.representative.id } label: {
+                            Button { openDetail(group) } label: {
                                 HStack(spacing: 18) {
                                     PosterArtwork(media: group.representative, url: group.poster, fallbackURL: group.info?.poster).frame(width: 50, height: 75).clipShape(RoundedRectangle(cornerRadius: 6))
                                     VStack(alignment: .leading, spacing: 5) { Text(group.title).font(.headline); Text(group.subtitle).font(.caption).foregroundStyle(.secondary) }
@@ -359,7 +432,7 @@ struct RootView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: posterWidth, maximum: posterWidth + 35), spacing: 22)], alignment: .leading, spacing: 22) {
                         ForEach(groups) { group in posterCard(group) }
                     }.scrollTargetLayout().padding(28)
-                }.scrollPosition(id: $gridAnchor, anchor: .top)
+                }.scrollPosition(id: performer == nil ? $gridAnchor : $performerGridAnchor, anchor: .top)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -377,7 +450,7 @@ struct RootView: View {
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 30) {
                 if let featured = values.first(where: { group in featuredMediaID.map { id in group.items.contains(where: { $0.id == id }) } ?? false }) ?? values.first(where: { $0.localBackdrop != nil || $0.info?.backdrop != nil }) ?? values.first {
-                    FeatureBanner(group: featured, play: { playback.open(featured.resume) }, details: { detailID = featured.representative.id }).onAppear { if featuredMediaID == nil { featuredMediaID = featured.representative.id } }
+                    FeatureBanner(group: featured, play: { playback.open(featured.resume) }, details: { openDetail(featured) }).onAppear { if featuredMediaID == nil { featuredMediaID = featured.representative.id } }
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     homeSectionHeader("收藏夹")
@@ -449,12 +522,12 @@ struct RootView: View {
         }
     }
     private func posterCard(_ group: MediaGroup) -> some View {
-        LibraryPoster(group: group) { detailID = group.representative.id }.contextMenu { mediaMenu(group) }
+        LibraryPoster(group: group) { openDetail(group) }.contextMenu { mediaMenu(group) }
     }
     @ViewBuilder private func mediaMenu(_ group: MediaGroup) -> some View {
         Button(group.resume.isContinuing ? "继续播放" : "播放") { playback.open(group.resume) }
         Button("从头播放") { let item = group.resume; library.reset(item.id); if let fresh = library.items.first(where: { $0.id == item.id }) { playback.open(fresh) } }
-        Button("查看详情") { detailID = group.representative.id }
+        Button("查看详情") { openDetail(group) }
         Button(group.isWatched ? "标记为未观看" : "标记为已观看") { library.setWatched(group.items.map(\.id), to: !group.isWatched) }
         Button(group.hasFavorite ? "取消收藏" : "加入收藏") { library.setFavorite(group.items.map(\.id), to: !group.hasFavorite) }
         Button("编辑影片信息 / 海报…") { matching = group.representative }
@@ -501,6 +574,13 @@ struct RootView: View {
                     }
                 }
             }.padding(28)
+        }
+    }
+    @ViewBuilder private func emptyPerformerView(_ performer: CastMember) -> some View {
+        if metadata.configured && performerCredits[performer.id] == nil && failedPerformerLookup != performer.id {
+            ProgressView("正在查找作品…")
+        } else {
+            ContentUnavailableView(localOnly ? "没有本地作品" : "媒体库中没有相关作品", systemImage: "film")
         }
     }
     private var emptyView: some View {

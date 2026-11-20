@@ -153,36 +153,59 @@ actor RemoteSources {
         source.url = SMBClient.serverURL(file).appending(component: String(share))
         return try await playbackURL(source: source, path: components.dropFirst().joined(separator: "/"))
     }
-    func scan(_ source: LibrarySource, credentials: SourceCredentials) async throws -> ScanResult {
+    @concurrent nonisolated func scan(_ source: LibrarySource, credentials: SourceCredentials, previous: NFOReader.Cache = .init()) async throws -> ScanResult {
         if source.kind == .smb && LibrarySource.smbURL(source.url.absoluteString) == nil { throw SourceWorker.failure("请先选择一个 SMB 共享文件夹。") }
         let (config, remote) = try await RcloneTool.configuration(kind: source.kind, url: source.url, credentials: credentials)
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let file = folder.appending(path: "rclone.conf"); try Data(config.utf8).write(to: file); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        let data = try await RcloneTool.run(["lsjson", remote, "--config", file.path, "--recursive", "--files-only", "--no-mimetype", "--no-modtime", "--contimeout", "15s", "--timeout", "45s", "--retries", "1"])
-        struct Entry: Decodable { let Path: String; let IsDir: Bool }
+        let data = try await RcloneTool.run(["lsjson", remote, "--config", file.path, "--recursive", "--files-only", "--no-mimetype", "--contimeout", "15s", "--timeout", "45s", "--retries", "1"])
+        struct Entry: Decodable {
+            let Path: String
+            let IsDir: Bool
+            let Size: Int64?
+            let ModTime: String?
+
+            var version: MediaFileVersion? {
+                // rclone reports 2000-01-01 when the server has no modification time.
+                guard let Size, Size >= 0, let ModTime, !ModTime.isEmpty,
+                      !ModTime.hasPrefix("2000-01-01T00:00:00"), !ModTime.hasPrefix("0001-01-01") else { return nil }
+                return MediaFileVersion(size: Size, modified: ModTime)
+            }
+        }
         let entries = try JSONDecoder().decode([Entry].self, from: data)
         var files: [ScannedFile] = []
         var sidecars: [URL: SidecarIndex] = [:]
+        var nfoVersions: [URL: MediaFileVersion] = [:]
         for entry in entries where !entry.IsDir && Self.safePath(entry.Path) {
             try Task.checkCancellation()
             let url = Self.virtualURL(source: source.id, path: entry.Path)
             if SidecarIndex.remoteVideoExtensions.contains(url.pathExtension.lowercased()) {
-                files.append(ScannedFile(url: url, relativePath: entry.Path))
+                files.append(ScannedFile(url: url, relativePath: entry.Path, fileVersion: entry.version))
             } else if !SidecarIndex.supports(url) { continue }
+            else if url.pathExtension.lowercased() == "nfo" { nfoVersions[url] = entry.version }
             sidecars[url.deletingLastPathComponent(), default: SidecarIndex()].insert(url)
         }
         SidecarIndex.attach(sidecars, to: &files)
-        let enriched = try await NFOReader.enrich(files) { url in
-            try await self.playbackURL(source: source, path: url.pathComponents.dropFirst().joined(separator: "/"))
+        let needsBridge = files.contains { file in
+            [file.nfo?.video, file.nfo?.show].compactMap { $0 }.contains {
+                !previous.hasVersion(of: $0, version: nfoVersions[$0])
+            }
         }
-        return ScanResult(files: enriched, unreadable: 0)
+        // A new bridge avoids stale directory entries from a previous scan or playback session.
+        let bridge = needsBridge ? try? await Self.startHTTP(remote: remote, config: file) : nil
+        defer { if let bridge, bridge.process.isRunning { bridge.process.terminate(); bridge.process.waitUntilExit() } }
+        let enriched = try await NFOReader.enrich(files, previous: previous, versions: nfoVersions) { url in
+            guard let bridge else { throw SourceWorker.failure("无法读取远程 NFO。") }
+            return Self.append(url.pathComponents.dropFirst().joined(separator: "/"), to: bridge.base)
+        }
+        return ScanResult(files: enriched.files, unreadable: 0, nfoCache: enriched.cache)
     }
     func playbackURL(source: LibrarySource, path: String) async throws -> URL {
         let key = SessionKey(source: source.id, url: source.url, kind: source.kind.rawValue, revision: source.connectionRevision)
         guard Self.safePath(path) else { throw SourceWorker.failure("无效的远程文件路径。") }
-        if let bridge = mediaBridges[key] { return append(path, to: bridge.1) }
-        if let session = sessions[key], session.process.isRunning { return append(path, to: session.base) }
+        if let bridge = mediaBridges[key] { return Self.append(path, to: bridge.1) }
+        if let session = sessions[key], session.process.isRunning { return Self.append(path, to: session.base) }
         let task: Task<URL, Error>
         if let pending = starting[key] { task = pending.1 }
         else {
@@ -192,7 +215,7 @@ actor RemoteSources {
         }
         let base = try await task.value
         try Task.checkCancellation()
-        return append(path, to: base)
+        return Self.append(path, to: base)
     }
     private func start(source: LibrarySource, key: SessionKey, ticket: UUID) async throws -> URL {
         defer { if starting[key]?.0 == ticket { starting[key] = nil } }
@@ -210,29 +233,40 @@ actor RemoteSources {
         }
         let (config, remote) = try await RcloneTool.configuration(kind: source.kind, url: source.url, credentials: credentials)
         let folder = try temporaryFolder(); let file = folder.appending(path: "rclone.conf")
+        var retained = false
+        defer { if !retained { try? FileManager.default.removeItem(at: folder) } }
         try Data(config.utf8).write(to: file); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        let bridge = try await Self.startHTTP(remote: remote, config: file)
+        guard !Task.isCancelled, starting[key]?.0 == ticket else {
+            if bridge.process.isRunning { bridge.process.terminate(); bridge.process.waitUntilExit() }
+            throw CancellationError()
+        }
+        sessions[key] = Session(process: bridge.process, folder: folder, base: bridge.base)
+        retained = true
+        return bridge.base
+    }
+
+    @concurrent private static func startHTTP(remote: String, config: URL) async throws -> (process: Process, base: URL) {
         let port = try Self.availablePort(); let prefix = UUID().uuidString
         let base = URL(string: "http://127.0.0.1:\(port)/\(prefix)/")!
         let process = Process(); process.executableURL = RcloneTool.executable
-        process.arguments = ["serve", "http", remote, "--config", file.path, "--addr", "127.0.0.1:\(port)", "--baseurl", prefix, "--read-only", "--vfs-cache-mode", "off", "--contimeout", "15s", "--timeout", "45s"]
+        process.arguments = ["serve", "http", remote, "--config", config.path, "--addr", "127.0.0.1:\(port)", "--baseurl", prefix, "--read-only", "--vfs-cache-mode", "off", "--contimeout", "15s", "--timeout", "45s"]
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice; process.standardInput = FileHandle.nullDevice
-        var ready = false
-        var retained = false
-        defer { if !retained { if process.isRunning { process.terminate() }; try? FileManager.default.removeItem(at: folder) } }
+        var handedOff = false
+        defer { if !handedOff, process.isRunning { process.terminate(); process.waitUntilExit() } }
         try process.run()
         for _ in 0..<40 {
             try Task.checkCancellation()
             guard process.isRunning else { throw SourceWorker.failure("远程播放桥启动失败，请检查来源配置。") }
             var request = URLRequest(url: base); request.httpMethod = "HEAD"; request.timeoutInterval = 0.2
-            if (try? await URLSession.shared.data(for: request)) != nil { ready = true; break }
+            if (try? await URLSession.shared.data(for: request)) != nil {
+                try Task.checkCancellation()
+                handedOff = true
+                return (process, base)
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
-        guard ready else { throw SourceWorker.failure("远程播放桥启动超时。") }
-        try Task.checkCancellation()
-        guard starting[key]?.0 == ticket else { throw CancellationError() }
-        sessions[key] = Session(process: process, folder: folder, base: base)
-        retained = true
-        return base
+        throw SourceWorker.failure("远程播放桥启动超时。")
     }
     private func stop(_ key: SessionKey) {
         starting.removeValue(forKey: key)?.1.cancel()
@@ -251,8 +285,8 @@ actor RemoteSources {
         for key in Set(sessions.keys).union(starting.keys).union(mediaBridges.keys) { stop(key) }
         for task in tasks { _ = try? await task.value }
     }
-    private func append(_ path: String, to base: URL) -> URL { path.split(separator: "/").reduce(base) { $0.appending(path: String($1)) } }
-    private func temporaryFolder() throws -> URL {
+    private static func append(_ path: String, to base: URL) -> URL { path.split(separator: "/").reduce(base) { $0.appending(path: String($1)) } }
+    nonisolated private func temporaryFolder() throws -> URL {
         let folder = FileManager.default.temporaryDirectory.appending(path: "Luma-Source-\(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]); return folder
     }

@@ -2,6 +2,23 @@ import Foundation
 import Testing
 @testable import Luma
 
+@Test func mountedBonjourAliasesMatchTheResolvedSMBEndpointOnly() throws {
+    let volume = URL(filePath: "/Volumes/Video")
+    let service = try #require(URL(string: "smb://Office.NAS._smb._tcp.local./Video"))
+    var share = try #require(MountedShareScanner.discovered(volume: volume, remount: service, name: "Video"))
+    #expect(service.host.flatMap(MountedShareScanner.smbServiceName) == "Office.NAS")
+    let actual = try #require(URL(string: "smb://files.local:445/Video/Series"))
+    #expect(MountedShareScanner.directory(for: actual, on: share) == nil)
+    share.mountedSMBEndpoint = MountedSMBEndpoint(host: "files.local.", port: 445, addresses: ["192.0.2.25"])
+    #expect(MountedShareScanner.directory(for: actual, on: share) == volume.appending(component: "Series"))
+    let numeric = try #require(URL(string: "smb://192.0.2.25/Video"))
+    #expect(MountedShareScanner.directory(for: numeric, on: share) == volume)
+    for value in ["smb://Office.NAS.local/Video", "smb://files.local:1445/Video", "smb://files.local/Other"] {
+        let url = try #require(URL(string: value))
+        #expect(MountedShareScanner.directory(for: url, on: share) == nil)
+    }
+}
+
 @Test func advertisedShareAddressesAndPaths() throws {
     let dav = try #require(DiscoveredShare.bonjour(type: "_webdavs._tcp.", name: "家庭 NAS", host: "NAS.local.", port: 5006, txt: ["path": Data("/dav/电影/".utf8)]))
     #expect(dav.kind == .webdav)

@@ -11,11 +11,12 @@ import Foundation
         let genre: String?
         let sort: String
         let excludedSourceIDs: Set<UUID>
+        let castCredits: Set<TMDBTitleID>
     }
     private var key: Key?
     private var result: [MediaGroup] = []
-    func groups(in library: Library, destination: Destination, search: String = "", localOnly: Bool = false, sourceID: UUID? = nil, genre: String? = nil, sort: String = "recent", excludedSourceIDs: Set<UUID> = []) -> [MediaGroup] {
-        let key = Key(libraryID: ObjectIdentifier(library), revision: library.revision, destination: destination, search: search, localOnly: localOnly, sourceID: sourceID, genre: genre, sort: sort, excludedSourceIDs: excludedSourceIDs)
+    func groups(in library: Library, destination: Destination, search: String = "", localOnly: Bool = false, sourceID: UUID? = nil, genre: String? = nil, sort: String = "recent", excludedSourceIDs: Set<UUID> = [], castCredits: Set<TMDBTitleID> = []) -> [MediaGroup] {
+        let key = Key(libraryID: ObjectIdentifier(library), revision: library.revision, destination: destination, search: search, localOnly: localOnly, sourceID: sourceID, genre: genre, sort: sort, excludedSourceIDs: excludedSourceIDs, castCredits: castCredits)
         if self.key == key { return result }
         let needle = MediaGroup.searchKey(search)
         var groups = library.groupedItems
@@ -47,6 +48,10 @@ import Foundation
             case .top: return !group.isTV && (group.info?.rating ?? 0) > 0
             case .genres: return !group.isTV && (genre == nil || group.genres.contains(genre!))
             case .unmatched: return group.info == nil && !group.hasLocalTitle
+            case .performer(let id, _):
+                guard let info = group.info else { return false }
+                return castCredits.contains(TMDBTitleID(id: info.id, kind: info.kind))
+                    || group.items.contains { $0.metadata?.cast?.contains { $0.id == id } == true }
             default: return true
             }
         }.sorted { a, b in

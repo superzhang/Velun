@@ -8,18 +8,20 @@ import AVFoundation
     @AppStorage("app.appearance") private var appearance = AppAppearance.system.rawValue
     @AppStorage("library.autoRefreshNAS") private var autoRefreshNAS = true
     @State private var library: Library
-    @State private var sources = SourcesStore()
+    @State private var sources: SourcesStore
     @State private var metadata = MetadataStore()
     @State private var playback: Playback
     init() {
         let library = Library(backgroundSaving: true)
-        let playback = Playback(library: library)
+        let sources = SourcesStore()
+        let playback = Playback(library: library, sources: sources)
         LumaApplicationDelegate.prepareForTermination = {
             playback.close()
             await library.flush()
             await RemoteSources.shared.stopAll()
         }
         _library = State(initialValue: library)
+        _sources = State(initialValue: sources)
         _playback = State(initialValue: playback)
     }
     var body: some Scene {
